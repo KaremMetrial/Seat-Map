@@ -1,0 +1,395 @@
+<?php
+
+namespace App\Schemas;
+
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\ValidationException;
+
+/**
+ * مخطط التحقق من صحة عناصر القالب (Template Elements)
+ * يمنع قنبلة البيانات من خلال التحقق الصارم من هيكل JSON
+ */
+class TemplateElementSchema
+{
+    /**
+     * مخططات التحقق حسب نوع العنصر
+     */
+    private const SCHEMAS = [
+        'seat' => [
+            'label' => 'required|string|max:20',
+            'row' => 'nullable|string|max:10',
+            'seat_number' => 'nullable|string|max:10',
+            'seat_type' => 'nullable|in:regular,wheelchair,companion',
+            'accessibility' => 'nullable|array',
+            'accessibility.wheelchair' => 'nullable|boolean',
+            'accessibility.hearing_assistance' => 'nullable|boolean',
+            'accessibility.visual_assistance' => 'nullable|boolean',
+            // 3D properties
+            'depth' => 'nullable|numeric|min:0',
+            'elevation' => 'nullable|numeric|min:0',
+        ],
+        'section' => [
+            'label' => 'required|string|max:50',
+            'capacity' => 'nullable|integer|min:1',
+            'curve' => 'nullable|array',
+            'curve.center_x' => 'nullable|numeric',
+            'curve.center_y' => 'nullable|numeric',
+            'curve.radius' => 'nullable|numeric|min:0',
+            'curve.start_angle' => 'nullable|numeric',
+            'curve.end_angle' => 'nullable|numeric',
+            // 3D properties
+            'depth' => 'nullable|numeric|min:0',
+            'elevation' => 'nullable|numeric|min:0',
+        ],
+        'table' => [
+            'label' => 'required|string|max:50',
+            'capacity' => 'required|integer|min:2|max:20',
+            'shape' => 'nullable|in:round,rectangular,square,oval',
+            'has_power' => 'nullable|boolean',
+            // 3D properties
+            'depth' => 'nullable|numeric|min:0',
+            'elevation' => 'nullable|numeric|min:0',
+        ],
+        'stage' => [
+            'label' => 'nullable|string|max:50',
+            'depth' => 'nullable|numeric|min:0',
+            'has_curtain' => 'nullable|boolean',
+            // 3D properties
+            'elevation' => 'nullable|numeric|min:0',
+            'height' => 'nullable|numeric|min:0',
+        ],
+        'shape' => [
+            'label' => 'nullable|string|max:50',
+            'capacity' => 'required|integer|min:1',
+            'standing_only' => 'nullable|boolean',
+            'shape_type' => 'nullable|in:rectangle,circle,ellipse,polygon',
+            // 3D properties
+            'depth' => 'nullable|numeric|min:0',
+            'elevation' => 'nullable|numeric|min:0',
+        ],
+        'entrance' => [
+            'label' => 'nullable|string|max:50',
+            'is_main' => 'nullable|boolean',
+            'width' => 'nullable|numeric|min:0',
+            // 3D properties
+            'height' => 'nullable|numeric|min:0',
+            'depth' => 'nullable|numeric|min:0',
+        ],
+        'text' => [
+            'content' => 'required|string|max:500',
+            'font_size' => 'nullable|integer|min:8|max:72',
+            'is_title' => 'nullable|boolean',
+        ],
+        'toilet' => [
+            'label' => 'nullable|string|max:50',
+            'accessible' => 'nullable|boolean',
+            // 3D properties
+            'depth' => 'nullable|numeric|min:0',
+            'elevation' => 'nullable|numeric|min:0',
+        ],
+        'aisle' => [
+            'label' => 'nullable|string|max:50',
+            'is_emergency' => 'nullable|boolean',
+            // 3D properties
+            'depth' => 'nullable|numeric|min:0',
+            'elevation' => 'nullable|numeric|min:0',
+        ],
+        'zone' => [
+            'label' => 'nullable|string|max:50',
+            'zone_type' => 'nullable|in:muster_station,emergency_assembly,waiting_area',
+            // 3D properties
+            'depth' => 'nullable|numeric|min:0',
+            'elevation' => 'nullable|numeric|min:0',
+        ],
+    ];
+
+    /**
+     * التحقق من صحة بيانات العنصر
+     */
+    public static function validate(string $elementType, ?array $data): array
+    {
+        if ($data === null) {
+            return [];
+        }
+
+        if (!isset(self::SCHEMAS[$elementType])) {
+            throw ValidationException::withMessages([
+                'element_type' => "نوع العنصر غير مدعوم: {$elementType}"
+            ]);
+        }
+
+        $rules = self::SCHEMAS[$elementType];
+        
+        $validator = Validator::make($data, $rules, [
+            'required' => 'حقل :attribute مطلوب',
+            'string' => 'حقل :attribute يجب أن يكون نصاً',
+            'integer' => 'حقل :attribute يجب أن يكون رقماً صحيحاً',
+            'numeric' => 'حقل :attribute يجب أن يكون رقماً',
+            'boolean' => 'حقل :attribute يجب أن يكون صحيحاً أو خطأ',
+            'array' => 'حقل :attribute يجب أن يكون مصفوفة',
+            'max' => 'حقل :attribute لا يمكن أن يتجاوز :max',
+            'min' => 'حقل :attribute يجب أن يكون على الأقل :min',
+            'in' => 'قيمة حقل :attribute غير صحيحة',
+        ], [
+            'label' => 'التسمية',
+            'row' => 'الصف',
+            'seat_number' => 'رقم المقعد',
+            'capacity' => 'السعة',
+            'content' => 'المحتوى',
+            'depth' => 'العمق',
+            'elevation' => 'الارتفاع',
+        ]);
+
+        if ($validator->fails()) {
+            throw new ValidationException($validator);
+        }
+
+        return $validator->validated();
+    }
+
+    /**
+     * التحقق من صحة بيانات الأسلوب
+     */
+    public static function validateStyle(?array $style): array
+    {
+        if ($style === null) {
+            return [];
+        }
+
+        $rules = [
+            'fill' => 'nullable|string|regex:/^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/',
+            'stroke' => 'nullable|string|regex:/^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/',
+            'stroke_width' => 'nullable|numeric|min:0|max:10',
+            'opacity' => 'nullable|numeric|min:0|max:1',
+            'rx' => 'nullable|numeric|min:0',
+            'ry' => 'nullable|numeric|min:0',
+            // 3D style properties
+            'fill_color' => 'nullable|string|regex:/^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/',
+            'ambient' => 'nullable|numeric|min:0|max:1',
+            'diffuse' => 'nullable|numeric|min:0|max:1',
+            'specular' => 'nullable|numeric|min:0|max:1',
+            'shininess' => 'nullable|numeric|min:0|max:100',
+        ];
+
+        $validator = Validator::make($style, $rules, [
+            'regex' => 'تنسيق اللون غير صحيح، استخدم تنسيق HEX (مثل #FF0000)',
+            'numeric' => 'حقل :attribute يجب أن يكون رقماً',
+        ]);
+
+        if ($validator->fails()) {
+            throw new ValidationException($validator);
+        }
+
+        return $validator->validated();
+    }
+
+    /**
+     * التحقق من صحة الإحداثيات
+     */
+    public static function validateCoordinates(array $data): bool
+    {
+        return isset($data['x'], $data['y']) &&
+               is_numeric($data['x']) &&
+               is_numeric($data['y']) &&
+               $data['x'] >= 0 &&
+               $data['y'] >= 0 &&
+               $data['x'] <= 10000 &&
+               $data['y'] <= 10000;
+    }
+
+    /**
+     * التحقق من عدم التداخل المكاني بين العناصر
+     */
+    public static function checkSpatialConflict(array $newElement, array $existingElements, array $options = []): array
+    {
+        $excludeIds = $options['exclude_ids'] ?? [];
+        $bufferZones = $options['buffer_zones'] ?? 0;
+        $conflicts = [];
+
+        $newRect = [
+            'x1' => $newElement['x'] - $bufferZones,
+            'y1' => $newElement['y'] - $bufferZones,
+            'x2' => $newElement['x'] + ($newElement['width'] ?? 0) + $bufferZones,
+            'y2' => $newElement['y'] + ($newElement['height'] ?? 0) + $bufferZones,
+            'z'  => $newElement['z'] ?? 0,
+        ];
+
+        foreach ($existingElements as $existing) {
+            if (in_array($existing['id'] ?? null, $excludeIds, true)) {
+                continue;
+            }
+
+            $existingRect = [
+                'x1' => $existing['x'],
+                'y1' => $existing['y'],
+                'x2' => $existing['x'] + ($existing['width'] ?? 0),
+                'y2' => $existing['y'] + ($existing['height'] ?? 0),
+                'z'  => $existing['z'] ?? 0,
+            ];
+
+            // Check 2D overlap
+            $overlap2D = self::rectanglesOverlap($newRect, $existingRect);
+
+            // Check vertical clearance if both have z values
+            $verticalConflict = false;
+            if (isset($newElement['z'], $existing['z'])) {
+                $newZ = $newElement['z'];
+                $existZ = $existing['z'];
+                $newClearance = $newElement['vertical_clearance'] ?? 0;
+                $existClearance = $existing['vertical_clearance'] ?? 0;
+
+                // Vertical overlap: one element's z-range intersects another's
+                $verticalConflict = ($newZ <= $existZ + $existClearance) &&
+                                   ($newZ + ($newElement['vertical_clearance'] ?? 0) >= $existZ);
+            }
+
+            if ($overlap2D && $verticalConflict) {
+                $conflicts[] = [
+                    'id' => $existing['id'] ?? null,
+                    'type' => $existing['element_type'] ?? 'unknown',
+                    'label' => $existing['data']['label'] ?? "Element {$existing['id']}",
+                    'position' => ['x' => $existing['x'], 'y' => $existing['y']],
+                ];
+            }
+        }
+
+        return [
+            'valid' => empty($conflicts),
+            'conflicts' => $conflicts,
+            'message' => empty($conflicts) ? '' : 'Spatial conflict detected with ' . count($conflicts) . ' element(s)',
+        ];
+    }
+
+    /**
+     * Rectangle AABB overlap check
+     */
+    private static function rectanglesOverlap(array $a, array $b): bool
+    {
+        return !($a['x2'] <= $b['x1'] ||
+                 $a['x1'] >= $b['x2'] ||
+                 $a['y2'] <= $b['y1'] ||
+                 $a['y1'] >= $b['y2']);
+    }
+
+    /**
+     * Validate clearance zones around critical elements (entrances, exits, aisles)
+     */
+    public static function validateClearanceZones(array $element, array $allElements, array $constraints = []): array
+    {
+        $violations = [];
+        $entranceBuffer = $constraints['entrance_buffer'] ?? 50;
+        $aisleMinWidth = $constraints['aisle_min_width'] ?? 120;
+
+        // If element is an entrance/exit, ensure clearance zone is empty of bookable seats
+        if (in_array($element['element_type'], ['entrance', 'emergency_exit'], true)) {
+            $bufferRect = [
+                'x1' => $element['x'] - $entranceBuffer,
+                'y1' => $element['y'] - $entranceBuffer,
+                'x2' => $element['x'] + ($element['width'] ?? 0) + $entranceBuffer,
+                'y2' => $element['y'] + ($element['height'] ?? 0) + $entranceBuffer,
+            ];
+
+            foreach ($allElements as $other) {
+                if ($other['id'] === ($element['id'] ?? null)) continue;
+
+                $otherRect = [
+                    'x1' => $other['x'],
+                    'y1' => $other['y'],
+                    'x2' => $other['x'] + ($other['width'] ?? 0),
+                    'y2' => $other['y'] + ($other['height'] ?? 0),
+                ];
+
+                if (self::rectanglesOverlap($bufferRect, $otherRect) &&
+                    in_array($other['element_type'], ['seat', 'table', 'section'], true)) {
+                    $violations[] = "Element '{$element['data']['label']}' has obstructed clearance zone by {$other['element_type']} '{$other['data']['label']}'";
+                }
+            }
+        }
+
+        // If element is an aisle/path, validate minimum width is maintained
+        if (in_array($element['element_type'], ['aisle', 'corridor'], true)) {
+            $width = $element['width'] ?? 0;
+            if ($width < $aisleMinWidth) {
+                $violations[] = "Aisle '{$element['data']['label']}': width {$width}cm < minimum required {$aisleMinWidth}cm";
+            }
+        }
+
+        return $violations;
+    }
+
+    /**
+     * Validate accessibility proximity requirements (ADA/IMO)
+     */
+    public static function validateAccessibilityProximity(
+        array $element,
+        array $allElements,
+        float $scaleFactor,
+        array $constraints = []
+    ): array {
+        $violations = [];
+        $toiletMaxDist = $constraints['toilet_max_distance_m'] ?? 30;
+        $musterMaxDist = $constraints['muster_max_distance_m'] ?? 50;
+
+        // Only check wheelchair-accessible seats
+        $seatType = $element['data']['seat_type'] ?? null;
+        $isAccessible = in_array($seatType, ['wheelchair', 'companion'], true);
+
+        if (!($element['element_type'] === 'seat' && $isAccessible)) {
+            return $violations;
+        }
+
+        $elX = $element['x'] + ($element['width'] / 2);
+        $elY = $element['y'] + ($element['height'] / 2);
+
+        // Find nearest accessible toilet
+        $nearestToilet = null;
+        $minToiletDist = PHP_INT_MAX;
+
+        // Find nearest muster station
+        $nearestMuster = null;
+        $minMusterDist = PHP_INT_MAX;
+
+        foreach ($allElements as $other) {
+            if ($other['id'] === ($element['id'] ?? null)) continue;
+
+            $otherX = $other['x'] + ($other['width'] / 2);
+            $otherY = $other['y'] + ($other['height'] / 2);
+            $dx = $elX - $otherX;
+            $dy = $elY - $otherY;
+            $distCanvas = sqrt($dx*$dx + $dy*$dy);
+            $distMeters = $distCanvas * $scaleFactor;
+
+            // Check for accessible toilet
+            if ($other['element_type'] === 'toilet' &&
+                ($other['data']['accessible'] ?? false)) {
+                if ($distMeters < $minToiletDist) {
+                    $minToiletDist = $distMeters;
+                    $nearestToilet = $other;
+                }
+            }
+
+            // Check for muster station
+            if ($other['element_type'] === 'zone' &&
+                ($other['data']['zone_type'] ?? '') === 'muster_station') {
+                if ($distMeters < $minMusterDist) {
+                    $minMusterDist = $distMeters;
+                    $nearestMuster = $other;
+                }
+            }
+        }
+
+        if ($nearestToilet === null) {
+            $violations[] = "Wheelchair seat '{$element['data']['label']}': No accessible toilet found within {$toiletMaxDist}m";
+        } elseif ($minToiletDist > $toiletMaxDist) {
+            $violations[] = "Wheelchair seat '{$element['data']['label']}': Nearest accessible toilet is {$minToiletDist}m away (max: {$toiletMaxDist}m)";
+        }
+
+        if ($nearestMuster === null) {
+            $violations[] = "Wheelchair seat '{$element['data']['label']}': No muster station found within {$musterMaxDist}m";
+        } elseif ($minMusterDist > $musterMaxDist) {
+            $violations[] = "Wheelchair seat '{$element['data']['label']}': Nearest muster station is {$minMusterDist}m away (max: {$musterMaxDist}m)";
+        }
+
+        return $violations;
+    }
+}

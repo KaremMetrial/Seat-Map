@@ -1,0 +1,536 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services;
+
+use App\Models\ElementLock;
+use App\Models\Event;
+use App\Models\EventElement;
+use Carbon\Carbon;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Redis;
+use Illuminate\Support\Str;
+
+/**
+ * Seat Lock Service — prevents double booking through layered atomic operations.
+ * 
+ * Enhanced with distributed locking and Redis Sentinel for high availability.
+ * 
+ * Defence layers (in execution order):
+ *
+ *   1. Redis Sentinel mutex  — acquired FIRST, before any DB read.
+ *                              Serialises concurrent requests for the same lock_key.
+ *   2. Distributed lock sharding — prevents hot row contention
+ *   3. Availability check inside the mutex — TOCTOU-safe.
+ *   4. Expired-lock DELETE inside a DB transaction — removes ghost rows before INSERT.
+ *   5. DB UNIQUE on element_locks(event_element_id) — last-resort guard for
+ *                        races between requests with different lock_keys.
+ */
+class SeatLockService
+{
+    private const LOCK_TTL_MINUTES = 10;
+    private const REDIS_MUTEX_TTL_SECONDS = 30;
+    private const REDIS_PREFIX = 'seatlock:';
+    private const MAX_DEADLOCK_RETRIES = 3;
+
+    /**
+     * @var DistributedSeatLockService|null
+     */
+    private ?DistributedSeatLockService $distributedLockService = null;
+
+    /**
+     * @var bool Whether Redis Sentinel is enabled
+     */
+    private bool $sentinelEnabled;
+
+    public function __construct()
+    {
+        $this->sentinelEnabled = config('database.redis.sentinel.active', false);
+        
+        // Initialize distributed lock service for high availability
+        if (config('database.redis.clustering.enabled', false)) {
+            $this->distributedLockService = app(DistributedSeatLockService::class);
+        }
+    }
+
+    // ── Public API ────────────────────────────────────────────────────────────
+
+    /**
+     * Lock multiple elements atomically with high availability support.
+     *
+     * @param  array<int> $elementIds  event_element IDs to lock
+     * @param  string     $lockKey     Non-empty session/cart identifier.
+     *                                 Auto-generates a UUID if empty string passed.
+     * @param  int        $ttlMinutes  Lock duration (default 10 min)
+     * @return array{success: bool, message: string, ...}
+     */
+    public function lockElements(
+        array $elementIds,
+        string $lockKey,
+        int $ttlMinutes = self::LOCK_TTL_MINUTES,
+    ): array {
+        // Guard: empty lock_key would cause all callers to share the same mutex
+        if (trim($lockKey) === '') {
+            $lockKey = Str::uuid()->toString();
+        }
+
+        // ── Step 1: Acquire Redis mutex FIRST (with Sentinel support) ────────
+        // Must come before the availability check to eliminate the TOCTOU window.
+        $redisKey = self::REDIS_PREFIX . $lockKey;
+        $lockAcquired = $this->acquireRedisMutex($redisKey);
+
+        if (! $lockAcquired) {
+            return [
+                'success' => false,
+                'message' => 'Concurrent operation detected, please try again',
+                'code' => 'concurrent_operation',
+            ];
+        }
+
+        try {
+            // ── Step 2: Use distributed locking if enabled ────────────────────
+            if ($this->distributedLockService !== null) {
+                return $this->lockElementsDistributed($elementIds, $lockKey, $ttlMinutes, $redisKey);
+            }
+
+            // ── Step 3: Fallback to standard locking ─────────────────────────
+            return $this->lockElementsStandard($elementIds, $lockKey, $ttlMinutes, $redisKey);
+        } catch (\Exception $e) {
+            $this->releaseRedisMutex($redisKey);
+
+            return [
+                'success' => false,
+                'message' => 'Failed to lock seats: ' . $e->getMessage(),
+                'code' => 'lock_failed',
+            ];
+        }
+    }
+
+    /**
+     * Lock elements using distributed Redis shards.
+     */
+    private function lockElementsDistributed(
+        array $elementIds,
+        string $lockKey,
+        int $ttlMinutes,
+        string $redisKey
+    ): array {
+        $ttlSeconds = $ttlMinutes * 60;
+        $now = Carbon::now();
+        $expiresAt = $now->copy()->addMinutes($ttlMinutes);
+
+        try {
+            DB::beginTransaction();
+
+            // Acquire distributed locks for all elements
+            foreach ($elementIds as $elementId) {
+                if (! $this->distributedLockService->acquireLock($elementId, $lockKey, $ttlSeconds)) {
+                    DB::rollBack();
+                    $this->releaseRedisMutex($redisKey);
+
+                    return [
+                        'success' => false,
+                        'message' => 'Failed to acquire distributed lock',
+                        'conflict_element' => $elementId,
+                        'code' => 'distributed_lock_failed',
+                    ];
+                }
+            }
+
+            // Bulk-load event_ids
+            $eventIdMap = EventElement::whereIn('id', $elementIds)
+                ->pluck('event_id', 'id')
+                ->all();
+
+            // Insert locks into database with retry logic
+            foreach ($elementIds as $elementId) {
+                try {
+                    $this->insertLockWithRetry([
+                        'event_element_id' => $elementId,
+                        'event_id' => $eventIdMap[$elementId],
+                        'lock_key' => $lockKey,
+                        'lock_value' => $lockKey . ':' . microtime(true),
+                        'expires_at' => $expiresAt,
+                        'locked_at' => $now,
+                    ]);
+                } catch (\Exception $e) {
+                    DB::rollBack();
+                    $this->releaseRedisMutex($redisKey);
+
+                    return [
+                        'success' => false,
+                        'message' => 'Seat was just taken by another user',
+                        'conflict_element' => $elementId,
+                        'code' => 'seat_taken',
+                    ];
+                }
+            }
+
+            DB::commit();
+            $this->releaseRedisMutex($redisKey);
+
+            return [
+                'success' => true,
+                'message' => 'Seats locked successfully (distributed)',
+                'locked_elements' => $elementIds,
+                'expires_at' => $expiresAt->toIso8601String(),
+                'mode' => 'distributed',
+            ];
+        } catch (\Exception $e) {
+            DB::rollBack();
+            $this->releaseRedisMutex($redisKey);
+
+            return [
+                'success' => false,
+                'message' => 'Failed to lock seats: ' . $e->getMessage(),
+                'code' => 'distributed_lock_error',
+            ];
+        }
+    }
+
+    /**
+     * Lock elements using standard Redis (fallback).
+     * 
+     * FIXED: Uses SELECT FOR UPDATE within transaction to prevent race condition
+     * between availability check and lock insertion.
+     */
+    private function lockElementsStandard(
+        array $elementIds,
+        string $lockKey,
+        int $ttlMinutes,
+        string $redisKey
+    ): array {
+        $ttlSeconds = $ttlMinutes * 60;
+        $now = Carbon::now();
+        $expiresAt = $now->copy()->addMinutes($ttlMinutes);
+
+        $retries = 0;
+        
+        while ($retries < self::MAX_DEADLOCK_RETRIES) {
+            try {
+                DB::beginTransaction();
+
+                // FIXED: Check availability WITHIN transaction using SELECT FOR UPDATE
+                // This prevents TOCTOU race condition where another process could
+                // acquire a lock between our check and insert.
+                $unavailable = $this->checkUnavailableInTransaction($elementIds);
+
+                if (! empty($unavailable)) {
+                    DB::rollBack();
+                    $this->releaseRedisMutex($redisKey);
+
+                    return [
+                        'success' => false,
+                        'message' => 'Some seats are no longer available',
+                        'unavailable' => $unavailable,
+                        'code' => 'seats_unavailable',
+                    ];
+                }
+
+                // Bulk-load event_ids
+                $eventIdMap = EventElement::whereIn('id', $elementIds)
+                    ->pluck('event_id', 'id')
+                    ->all();
+
+                foreach ($elementIds as $elementId) {
+                    // Delete any expired lock
+                    ElementLock::where('event_element_id', $elementId)
+                        ->where('expires_at', '<=', $now)
+                        ->delete();
+
+                    try {
+                        $this->insertLockWithRetry([
+                            'event_element_id' => $elementId,
+                            'event_id' => $eventIdMap[$elementId],
+                            'lock_key' => $lockKey,
+                            'expires_at' => $expiresAt,
+                            'locked_at' => $now,
+                        ]);
+                    } catch (\Exception $e) {
+                        DB::rollBack();
+                        $this->releaseRedisMutex($redisKey);
+
+                        // Check if this is a deadlock or a genuine conflict
+                        if ($this->isDeadlock($e) && $retries < self::MAX_DEADLOCK_RETRIES - 1) {
+                            $retries++;
+                            continue 2; // Retry the entire transaction
+                        }
+
+                        return [
+                            'success' => false,
+                            'message' => 'Seat was just taken by another user',
+                            'conflict_element' => $elementId,
+                            'code' => 'seat_taken',
+                        ];
+                    }
+                }
+
+                DB::commit();
+                $this->releaseRedisMutex($redisKey);
+
+                return [
+                    'success' => true,
+                    'message' => 'Seats locked successfully',
+                    'locked_elements' => $elementIds,
+                    'expires_at' => $expiresAt->toIso8601String(),
+                    'mode' => 'standard',
+                ];
+            } catch (\Exception $e) {
+                DB::rollBack();
+                $this->releaseRedisMutex($redisKey);
+
+                // Retry on deadlock
+                if ($this->isDeadlock($e) && $retries < self::MAX_DEADLOCK_RETRIES - 1) {
+                    $retries++;
+                    usleep(100000 * $retries); // Exponential backoff: 100ms, 200ms, 400ms
+                    continue;
+                }
+
+                return [
+                    'success' => false,
+                    'message' => 'Failed to lock seats: ' . $e->getMessage(),
+                    'code' => 'lock_error',
+                ];
+            }
+        }
+
+        return [
+            'success' => false,
+            'message' => 'Failed to lock seats after multiple retries',
+            'code' => 'lock_retry_exhausted',
+        ];
+    }
+
+    /**
+     * FIXED: Check unavailable elements WITHIN transaction using SELECT FOR UPDATE.
+     * This locks the rows to prevent race conditions.
+     * 
+     * @param array<int> $elementIds
+     * @return array<int>
+     */
+    private function checkUnavailableInTransaction(array $elementIds): array
+    {
+        // Use SELECT FOR UPDATE to lock the rows and prevent concurrent modifications
+        $booked = \App\Models\BookingItem::whereIn('event_element_id', $elementIds)
+            ->where('status', 'booked')
+            ->lockForUpdate()
+            ->pluck('event_element_id')
+            ->all();
+
+        $locked = ElementLock::whereIn('event_element_id', $elementIds)
+            ->where('expires_at', '>', Carbon::now())
+            ->lockForUpdate()
+            ->pluck('event_element_id')
+            ->all();
+
+        return array_values(array_unique(array_merge($booked, $locked)));
+    }
+
+    /**
+     * Acquire Redis mutex with Sentinel support and file-based fallback.
+     * 
+     * FIXED: Uses file-based mutex as fallback instead of proceeding unprotected.
+     */
+    private function acquireRedisMutex(string $key): bool
+    {
+        try {
+            if ($this->sentinelEnabled) {
+                return Redis::connection('sentinel')
+                    ->set($key, 1, 'EX', self::REDIS_MUTEX_TTL_SECONDS, 'NX');
+            }
+
+            return Redis::set($key, 1, 'EX', self::REDIS_MUTEX_TTL_SECONDS, 'NX');
+        } catch (\Exception $e) {
+            logger()->warning('Redis mutex acquisition failed, using file-based fallback', [
+                'key' => $key,
+                'error' => $e->getMessage(),
+            ]);
+
+            // FIXED: Use file-based mutex as fallback to prevent race conditions
+            return $this->acquireFileMutex($key);
+        }
+    }
+
+    /**
+     * File-based mutex for Redis failure scenarios.
+     */
+    private function acquireFileMutex(string $key): bool
+    {
+        $lockFile = sys_get_temp_dir() . '/seatlock_' . md5($key);
+        $fp = fopen($lockFile, 'w+');
+        
+        if (!$fp) {
+            return false;
+        }
+
+        // Non-blocking exclusive lock
+        if (flock($fp, LOCK_EX | LOCK_NB)) {
+            // Store file handle and lock expiration
+            fwrite($fp, (string) time());
+            fflush($fp);
+            
+            // Register cleanup on script end
+            register_shutdown_function(function() use ($fp, $lockFile) {
+                flock($fp, LOCK_UN);
+                fclose($fp);
+                @unlink($lockFile);
+            });
+            
+            return true;
+        }
+
+        fclose($fp);
+        return false;
+    }
+
+    /**
+     * Insert lock with retry logic for deadlocks.
+     */
+    private function insertLockWithRetry(array $lockData, int $maxRetries = self::MAX_DEADLOCK_RETRIES): ElementLock
+    {
+        $attempt = 0;
+        $delay = 50000; // 50ms
+
+        while (true) {
+            try {
+                return ElementLock::create($lockData);
+            } catch (\Exception $e) {
+                if (++$attempt >= $maxRetries || !$this->isDeadlock($e)) {
+                    throw $e;
+                }
+
+                usleep($delay);
+                $delay *= 2; // Exponential backoff
+            }
+        }
+    }
+
+    /**
+     * Release Redis mutex.
+     */
+    private function releaseRedisMutex(string $key): void
+    {
+        try {
+            if ($this->sentinelEnabled) {
+                Redis::connection('sentinel')->del($key);
+            } else {
+                Redis::del($key);
+            }
+        } catch (\Exception $e) {
+            logger()->warning('Failed to release Redis mutex', [
+                'key' => $key,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Release all locks held by a given lock_key.
+     */
+    public function releaseLocks(string $lockKey): int
+    {
+        $deleted = ElementLock::where('lock_key', $lockKey)->delete();
+
+        // Also release distributed locks
+        if ($this->distributedLockService !== null) {
+            // Note: In production, you'd track which elements were locked
+            // For now, rely on TTL expiration
+        }
+
+        return $deleted;
+    }
+
+    /**
+     * Extend the expiration of all locks for a given lock_key.
+     */
+    public function extendLock(string $lockKey, int $minutes = self::LOCK_TTL_MINUTES): bool
+    {
+        $updated = ElementLock::where('lock_key', $lockKey)
+            ->update(['expires_at' => Carbon::now()->addMinutes($minutes)]);
+
+        return $updated > 0;
+    }
+
+    /**
+     * Get available (bookable, unlocked, unbooked) elements for an event.
+     */
+    public function getAvailableElements(Event $event): array
+    {
+        return $event->eventElements()
+            ->where('is_bookable', true)
+            ->whereNotIn('id', fn ($q) => $q
+                ->select('event_element_id')
+                ->from('booking_items')
+                ->where('status', 'booked')
+            )
+            ->whereNotIn('id', fn ($q) => $q
+                ->select('event_element_id')
+                ->from('element_locks')
+                ->where('expires_at', '>', Carbon::now())
+            )
+            ->get()
+            ->map(fn (EventElement $element) => [
+                'id' => $element->id,
+                'type' => $element->element_type,
+                'label' => $element->getLabel(),
+                'x' => $element->x,
+                'y' => $element->y,
+                'status' => 'available',
+            ])
+            ->toArray();
+    }
+
+    /**
+     * Get health status of distributed locks.
+     */
+    public function getHealthStatus(): array
+    {
+        $status = [
+            'sentinel_enabled' => $this->sentinelEnabled,
+            'distributed_enabled' => $this->distributedLockService !== null,
+        ];
+
+        if ($this->distributedLockService !== null) {
+            $status['shard_health'] = $this->distributedLockService->getShardHealth();
+            $status['lock_distribution'] = $this->distributedLockService->getLockDistribution();
+        }
+
+        return $status;
+    }
+
+    // ── Private helpers ───────────────────────────────────────────────────────
+
+    /**
+     * Return element IDs that are already booked or actively locked.
+     * 
+     * @deprecated Use checkUnavailableInTransaction() within a transaction instead.
+     */
+    private function checkUnavailable(array $elementIds): array
+    {
+        $booked = \App\Models\BookingItem::whereIn('event_element_id', $elementIds)
+            ->where('status', 'booked')
+            ->pluck('event_element_id')
+            ->all();
+
+        $locked = ElementLock::whereIn('event_element_id', $elementIds)
+            ->where('expires_at', '>', Carbon::now())
+            ->pluck('event_element_id')
+            ->all();
+
+        return array_values(array_unique(array_merge($booked, $locked)));
+    }
+
+    /**
+     * Check if exception is a database deadlock.
+     */
+    private function isDeadlock(\Exception $e): bool
+    {
+        $message = $e->getMessage();
+        $code = $e->getCode();
+
+        return strpos($message, 'Deadlock') !== false ||
+               $code === 1213 || // Deadlock found
+               $code === 1205;   // Lock wait timeout
+    }
+}

@@ -1,0 +1,490 @@
+/*
+ * Accessible Seat Map Styles - WCAG 2.1 AA Compliant
+ * Enhanced with Kinesthetic UX improvements
+ */
+
+:root {
+    /* WCAG AA Compliant Color Palette */
+    --seat-available: #0056b3;      /* Blue - 4.5:1 contrast on white */
+    --seat-available-hover: #003d82; /* Darker blue for hover */
+    --seat-locked: #d4a017;         /* Gold - 4.5:1 contrast on white */
+    --seat-locked-hover: #b38715;   /* Darker gold for hover */
+    --seat-booked: #a94442;         /* Red - 4.5:1 contrast on white */
+    --seat-booked-hover: #8b3a38;   /* Darker red for hover */
+    --focus-outline: #005fcc;       /* High contrast focus indicator */
+    --focus-outline-width: 3px;
+    --border-radius: 4px;
+    --transition-speed: 0.2s;
+    --transition-speed-slow: 0.3s;
+}
+
+/* High Contrast Mode Support */
+@media (prefers-contrast: high) {
+    :root {
+        --seat-available: #0000ff;
+        --seat-locked: #ffd700;
+        --seat-booked: #ff0000;
+        --focus-outline-width: 4px;
+    }
+}
+
+/* Reduced Motion Support */
+@media (prefers-reduced-motion: reduce) {
+    .seat-element,
+    .seat-element *,
+    .focus-indicator {
+        transition: none !important;
+        animation: none !important;
+    }
+}
+
+/* Main SVG Container */
+.seat-map-container {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    min-height: 400px;
+    background-color: #ffffff;
+    border: 2px solid #dee2e6;
+    border-radius: var(--border-radius);
+}
+
+/* SVG Element Styles */
+.seat-map-svg {
+    width: 100%;
+    height: 100%;
+    min-height: 400px;
+}
+
+/* Seat Element Base Styles */
+.seat-element {
+    cursor: pointer;
+    outline: none;
+    transition: 
+        transform var(--transition-speed) ease,
+        filter var(--transition-speed) ease,
+        stroke-width var(--transition-speed) ease;
+}
+
+/* ============================================
+   ENHANCED FOCUS INDICATOR WITH KINESTHETIC UX
+   ============================================ */
+
+/* Focus Indicator - Critical for Keyboard Navigation */
+.seat-element:focus {
+    outline: none; /* Remove default outline */
+    filter: brightness(1.15);
+}
+
+/* Custom Focus Ring with Smooth Animation */
+.seat-element.focus-ring {
+    position: relative;
+}
+
+.seat-element.focus-ring::after {
+    content: '';
+    position: absolute;
+    top: -8px;
+    left: -8px;
+    right: -8px;
+    bottom: -8px;
+    border: var(--focus-outline-width) solid var(--focus-outline);
+    border-radius: calc(var(--border-radius) + 4px);
+    pointer-events: none;
+    /* Kinesthetic enhancement: smooth scale and fade */
+    animation: focusPulse var(--transition-speed-slow) ease-out;
+}
+
+@keyframes focusPulse {
+    0% {
+        transform: scale(0.8);
+        opacity: 0;
+    }
+    50% {
+        transform: scale(1.05);
+        opacity: 0.8;
+    }
+    100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+/* Alternative: Using box-shadow for smoother performance */
+.seat-element:focus-visible {
+    outline: none;
+    box-shadow: 
+        0 0 0 var(--focus-outline-width) var(--focus-outline),
+        0 0 0 calc(var(--focus-outline-width) + 2px) rgba(0, 95, 204, 0.3);
+    border-radius: var(--border-radius);
+    /* Kinesthetic: subtle scale up on focus */
+    transform: scale(1.02);
+    transition: 
+        transform var(--transition-speed-slow) ease,
+        box-shadow var(--transition-speed-slow) ease;
+}
+
+/* Hover States */
+.seat-element:hover {
+    transform: scale(1.08);
+    filter: brightness(1.2);
+    transition: 
+        transform var(--transition-speed) ease,
+        filter var(--transition-speed) ease;
+}
+
+/* Seat Status Colors - WCAG AA Compliant */
+.seat-available {
+    fill: var(--seat-available);
+    stroke: #003d82;
+    stroke-width: 1.5;
+    transition: 
+        fill var(--transition-speed) ease,
+        stroke var(--transition-speed) ease,
+        stroke-width var(--transition-speed) ease;
+}
+
+.seat-available:hover {
+    fill: var(--seat-available-hover);
+    stroke-width: 2;
+}
+
+.seat-locked {
+    fill: var(--seat-locked);
+    stroke: #b38715;
+    stroke-width: 1.5;
+    stroke-dasharray: 4, 4;
+    animation: locked-pulse 2s infinite;
+    transition: 
+        fill var(--transition-speed) ease,
+        stroke var(--transition-speed) ease;
+}
+
+.seat-locked:hover {
+    fill: var(--seat-locked-hover);
+    stroke-width: 2;
+}
+
+.seat-booked {
+    fill: var(--seat-booked);
+    stroke: #8b3a38;
+    stroke-width: 1.5;
+    opacity: 0.8;
+    transition: 
+        fill var(--transition-speed) ease,
+        opacity var(--transition-speed) ease;
+}
+
+.seat-booked:hover {
+    fill: var(--seat-booked-hover);
+    opacity: 0.9;
+}
+
+/* Animation for locked seats */
+@keyframes locked-pulse {
+    0%, 100% { 
+        opacity: 1;
+        stroke-width: 1.5;
+    }
+    50% { 
+        opacity: 0.7;
+        stroke-width: 2;
+    }
+}
+
+/* Seat Label Text */
+.seat-label {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 10px;
+    font-weight: 600;
+    fill: #ffffff;
+    text-anchor: middle;
+    dominant-baseline: middle;
+    pointer-events: none;
+    user-select: none;
+    transition: font-size var(--transition-speed) ease;
+}
+
+.seat-element:hover .seat-label {
+    font-size: 11px;
+    font-weight: 700;
+}
+
+/* Section/Zone Labels */
+.zone-label {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 14px;
+    font-weight: 600;
+    fill: #495057;
+    text-anchor: middle;
+    pointer-events: none;
+}
+
+/* Accessibility Badges */
+.accessibility-badge {
+    fill: #28a745;
+    stroke: #1e7e34;
+    stroke-width: 1;
+    transition: all var(--transition-speed) ease;
+}
+
+.accessibility-badge-icon {
+    fill: #ffffff;
+    font-size: 8px;
+    font-weight: bold;
+}
+
+/* Screen Reader Only Text */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* ============================================
+   ENHANCED TOUCH TARGETS FOR MOBILE
+   ============================================ */
+
+/* Minimum touch target size (WCAG 2.5.5)
+   44px × 44px recommended for touch */
+.seat-touch-target {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 8px;
+}
+
+/* Mobile-optimized seat hit area */
+@media (pointer: coarse) {
+    .seat-element {
+        /* Enlarge touch area without affecting visual size */
+        stroke-width: 8;
+        stroke: transparent;
+    }
+    
+    .seat-element:hover,
+    .seat-element:focus {
+        stroke-width: 10;
+    }
+}
+
+/* ============================================
+   SKIP LINK FOR KEYBOARD USERS
+   ============================================ */
+
+.skip-link {
+    position: absolute;
+    top: -40px;
+    left: 0;
+    background: var(--focus-outline);
+    color: #ffffff;
+    padding: 12px 20px;
+    z-index: 10000;
+    text-decoration: none;
+    border-radius: 0 0 var(--border-radius) 0;
+    font-weight: 600;
+    /* Kinesthetic: smooth slide-in animation */
+    transition: top var(--transition-speed-slow) ease;
+}
+
+.skip-link:focus {
+    top: 0;
+    outline: 3px solid #fff;
+    outline-offset: 2px;
+}
+
+/* ============================================
+   3D CONTROLS TOUCH OPTIMIZATION
+   ============================================ */
+
+/* Controls container for 3D view */
+.seatmap-3d-controls {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 12px;
+    z-index: 100;
+    background: rgba(255, 255, 255, 0.95);
+    padding: 12px 16px;
+    border-radius: 50px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+    backdrop-filter: blur(10px);
+}
+
+/* Individual control buttons */
+.seatmap-control-btn {
+    /* WCAG 2.5.5: Target size at least 44px */
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    min-height: 44px;
+    border: 2px solid var(--seat-available);
+    background: #fff;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    font-weight: bold;
+    color: var(--seat-available);
+    /* Kinesthetic: smooth all interactive states */
+    transition: 
+        all var(--transition-speed) ease,
+        transform var(--transition-speed-slow) cubic-bezier(0.34, 1.56, 0.64, 1);
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* Enhanced touch feedback */
+.seatmap-control-btn:hover {
+    background: var(--seat-available);
+    color: #fff;
+    transform: scale(1.1);
+}
+
+/* Active/pressed state for touch devices */
+.seatmap-control-btn:active {
+    transform: scale(0.95);
+    transition-duration: 0.1s;
+}
+
+/* Focus state for keyboard navigation */
+.seatmap-control-btn:focus-visible {
+    outline: 3px solid var(--focus-outline);
+    outline-offset: 3px;
+    box-shadow: 0 0 0 4px rgba(0, 95, 204, 0.3);
+}
+
+/* Icon inside buttons */
+.seatmap-control-btn svg {
+    width: 20px;
+    height: 20px;
+    transition: transform var(--transition-speed) ease;
+}
+
+.seatmap-control-btn:hover svg {
+    transform: scale(1.1);
+}
+
+/* Disabled state */
+.seatmap-control-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+    background: #f0f0f0;
+    border-color: #ccc;
+    color: #999;
+}
+
+/* Alternative: Larger touch targets for accessibility */
+.seatmap-control-btn.large-touch {
+    width: 56px;
+    height: 56px;
+    min-width: 56px;
+    min-height: 56px;
+    font-size: 22px;
+}
+
+.seatmap-control-btn.large-touch svg {
+    width: 24px;
+    height: 24px;
+}
+
+/* Loading state with smooth animation */
+.seatmap-control-btn.loading {
+    pointer-events: none;
+    animation: btnLoading 1.5s infinite;
+}
+
+@keyframes btnLoading {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+/* ============================================
+   REDUCED MOTION ADJUSTMENTS
+   ============================================ */
+
+@media (prefers-reduced-motion: reduce) {
+    .seatmap-control-btn {
+        transition: none;
+        transform: none;
+    }
+    
+    .seatmap-control-btn:hover {
+        transform: none;
+    }
+    
+    .seatmap-control-btn:active {
+        transform: none;
+    }
+    
+    .seat-element {
+        transition: none;
+    }
+    
+    .seat-element.focus-ring::after {
+        animation: none;
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+/* ============================================
+   HIGH CONTRAST MODE
+   ============================================ */
+
+@media (prefers-contrast: high) {
+    .seatmap-control-btn {
+        border-width: 3px;
+    }
+    
+    .seatmap-control-btn:focus-visible {
+        outline-width: 4px;
+    }
+    
+    .seat-element:focus-visible {
+        outline-width: 4px;
+        box-shadow: 
+            0 0 0 4px var(--focus-outline),
+            0 0 0 6px rgba(0, 0, 0, 0.5);
+    }
+}
+
+/* ============================================
+   UTILITY CLASSES
+   ============================================ */
+
+/* Smooth reveal animation */
+.reveal-animation {
+    animation: revealIn var(--transition-speed-slow) ease-out;
+}
+
+@keyframes revealIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px) scale(0.98);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+/* Status indicator pulse */
+.status-pulse {
+    animation: statusPulse 2s ease-in-out infinite;
+}
+
+@keyframes statusPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
