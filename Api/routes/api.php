@@ -74,12 +74,15 @@ Route::prefix('v1')->group(function () {
     Route::get('events/{event}/seatmap', [SeatMapController::class, 'show']);
     Route::get('events/{event}/available', [SeatMapController::class, 'available']);
 
-    // ── Bookings ──────────────────────────────────────────────────────────────
+    // ── Bookings (with stricter rate limiting) ────────────────────────────────
 
-    Route::post('bookings/lock', [BookingController::class, 'lock']);
-    Route::post('bookings', [BookingController::class, 'store']);
+    Route::middleware('throttle:bookings')->group(function () {
+        Route::post('bookings/lock', [BookingController::class, 'lock']);
+        Route::post('bookings', [BookingController::class, 'store']);
+        Route::post('bookings/{booking}/confirm', [BookingController::class, 'confirm']);
+        Route::delete('bookings/{booking}', [BookingController::class, 'destroy']);
+    });
+    
     Route::get('bookings/{booking}', [BookingController::class, 'show']);
-    Route::post('bookings/{booking}/confirm', [BookingController::class, 'confirm']);
-    Route::delete('bookings/{booking}', [BookingController::class, 'destroy']);
 
 });

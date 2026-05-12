@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
+use App\Models\TemplateElement;
 use App\Models\Venue;
 use App\Models\VenueTemplate;
 use App\Http\Requests\StoreTemplateRequest;
@@ -133,14 +134,18 @@ class TemplateController extends Controller
         $newTemplate->is_default = false;
         $newTemplate->save();
 
-        // Duplicate elements
-        foreach ($template->elements as $element) {
-            $newElement = $element->replicate();
-            $newElement->template_id = $newTemplate->id;
-            $newElement->save();
+        // Duplicate elements using bulk insert (avoid N+1)
+        $elementsData = $template->elements->map(function ($element) use ($newTemplate) {
+            $new = $element->replicate();
+            $new->template_id = $newTemplate->id;
+            return $new->attributesToArray();
+        })->toArray();
+
+        if (!empty($elementsData)) {
+            TemplateElement::insert($elementsData);
         }
 
-        // Duplicate zones
+        // Duplicate zones and build mapping
         $zoneMap = [];
         foreach ($template->zones as $zone) {
             $newZone = $zone->replicate();

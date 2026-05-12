@@ -52,13 +52,76 @@ class TemplateZone extends Model
         )->withPivot('price_modifier', 'modifier_type');
     }
 
+    // ── Scopes ─────────────────────────────────────────────────────────────────
+
+    /**
+     * Scope to only active zones.
+     */
+    public function scopeActive($query)
+    {
+        return $query->where('is_active', true);
+    }
+
     // ── Business logic ────────────────────────────────────────────────────────
 
     /**
+     * Calculate final price for an element in this zone.
+     *
+     * @param float $productBasePrice The base price of the product/event
+     * @param float|null $pivotModifier Price modifier from element-zone pivot table
+     * @param string|null $pivotModifierType Type of modifier ('fixed' or 'percent')
+     * @return float
+     */
+    public function calculateFinalPrice(
+        float $productBasePrice,
+        ?float $pivotModifier = null,
+        ?string $pivotModifierType = null
+    ): float {
+        // Start with product base price
+        $price = $productBasePrice;
+
+        // Add zone base price
+        $price += (float) $this->base_price;
+
+        // Apply element-specific modifier from pivot table if present
+        if ($pivotModifier !== null && $pivotModifierType !== null) {
+            $price = match ($pivotModifierType) {
+                'fixed' => $price + $pivotModifier,
+                'percent' => $price * (1 + ($pivotModifier / 100)),
+                default => $price,
+            };
+        }
+
+        // Add service fee
+        $price += (float) $this->service_fee;
+
+        return max(0.0, round($price, 2));
+    }
+
+    /**
+     * Legacy method for backward compatibility.
      * Apply zone price modifier to a base price.
+     * 
+     * @deprecated Use calculateFinalPrice() instead
      */
     public function calculatePrice(float $basePrice): float
     {
         return max(0.0, round($basePrice + (float) $this->base_price, 2));
+    }
+
+    /**
+     * Get actual element count from pivot table (vs stored capacity).
+     */
+    public function getActualElementCount(): int
+    {
+        return $this->elements()->count();
+    }
+
+    /**
+     * Sync capacity column with actual element count.
+     */
+    public function syncCapacity(): void
+    {
+        $this->update(['capacity' => $this->getActualElementCount()]);
     }
 }

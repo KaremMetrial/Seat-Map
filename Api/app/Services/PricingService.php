@@ -26,8 +26,11 @@ class PricingService
         $subtotal = 0.0;
         $items    = [];
 
+        // Preload pivot data for zone pricing to prevent N+1
+        $pivotData = $this->preloadPivotData($elements);
+
         foreach ($elements as $element) {
-            $unitPrice = $this->calculateElementPrice($element, $event);
+            $unitPrice = $this->calculateElementPrice($element, $event, $pivotData);
             $capacity  = (int) ($element->data_json['capacity'] ?? 1);
             $lineTotal = round($unitPrice * $capacity, 2);
 
@@ -57,15 +60,83 @@ class PricingService
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    private function calculateElementPrice(EventElement $element, Event $event): float
+    /**
+     * Preload pivot data for zone-element relationships to prevent N+1 queries.
+     *
+     * @param  \Illuminate\Support\Collection $elements
+     * @return array<int, array{zone_id: int, price_modifier: ?float, modifier_type: ?string}>
+     */
+    private function preloadPivotData($elements): array
+    {
+        $pivotData = [];
+        
+        // Get template element IDs and zone IDs from event elements
+        $templateElementIds = $elements->pluck('template_element_id')->filter()->unique()->all();
+        $zoneIds = $elements->pluck('zone_id')->filter()->unique()->all();
+        
+        if (empty($templateElementIds) || empty($zoneIds)) {
+            return $pivotData;
+        }
+        
+        // Eager load the pivot relationships
+        $templateElements = \App\Models\TemplateElement::whereIn('id', $templateElementIds)
+            ->with(['zones' => fn($q) => $q->whereIn('template_zones.id', $zoneIds)])
+            ->get()
+            ->keyBy('id');
+        
+        foreach ($elements as $element) {
+            if (!$element->template_element_id || !$element->zone_id) {
+                continue;
+            }
+            
+            $templateElement = $templateElements->get($element->template_element_id);
+            if (!$templateElement) {
+                continue;
+            }
+            
+            $zone = $templateElement->zones->firstWhere('id', $element->zone_id);
+            if ($zone && $zone->pivot) {
+                $pivotData[$element->id] = [
+                    'zone_id' => $zone->id,
+                    'price_modifier' => $zone->pivot->price_modifier,
+                    'modifier_type' => $zone->pivot->modifier_type,
+                ];
+            }
+        }
+        
+        return $pivotData;
+    }
+
+    private function calculateElementPrice(EventElement $element, Event $event, array $pivotData = []): float
     {
         $basePrice = (float) $event->base_price;
 
-        // Zone-based price modifier
+        // Zone-based price modifier (with pivot data for element-specific pricing)
         if ($element->zone_id) {
             $zone = TemplateZone::find($element->zone_id);
             if ($zone) {
-                $basePrice = $zone->calculatePrice($basePrice);
+                // Use preloaded pivot data if available, otherwise fall back to query
+                $pivotModifier = null;
+                $pivotModifierType = null;
+                
+                if (isset($pivotData[$element->id])) {
+                    $pivotModifier = $pivotData[$element->id]['price_modifier'];
+                    $pivotModifierType = $pivotData[$element->id]['modifier_type'];
+                } else {
+                    // Fallback for single element lookups
+                    $pivot = \App\Models\TemplateElement::find($element->template_element_id)
+                        ?->zones()
+                        ->where('template_zones.id', $zone->id)
+                        ->first()?->pivot;
+                    $pivotModifier = $pivot?->price_modifier;
+                    $pivotModifierType = $pivot?->modifier_type;
+                }
+                
+                $basePrice = $zone->calculateFinalPrice(
+                    $basePrice,
+                    $pivotModifier,
+                    $pivotModifierType
+                );
             }
         }
 

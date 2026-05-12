@@ -139,7 +139,7 @@ class VenueTemplate extends Model
                     'metrics' => [
                         'width_m' => $this->toMeters($el->width),
                         'depth_m' => $this->toMeters($el->height),
-                        'area_sqm' => $this->toMeters($el->width * $el->height),
+                        'area_sqm' => $this->toMeters($el->width) * $this->toMeters($el->height),
                     ],
                     'z_index' => $el->z_index,
                 ];
@@ -213,8 +213,9 @@ class VenueTemplate extends Model
                 case 'emergency_exit':
                     $summary['exits_checked']++;
                     // Check clearance zone (1m radius must be free of permanent obstructions)
+                    // Pass empty array - we want to FIND obstructions, not exclude them
                     $clearanceRadiusM = $EXIT_BUFFER_M;
-                    $obstructing = $this->findElementsInRadius($el, $clearanceRadiusM, ['seat', 'table', 'stage']);
+                    $obstructing = $this->findObstructingElementsInRadius($el, $clearanceRadiusM, ['seat', 'table', 'stage']);
                     if ($obstructing->isNotEmpty()) {
                         $names = $obstructing->pluck('data_json.label')->join(', ');
                         $violations[] = "Exit '{$el->data_json['label']}': clearance zone obstructed by {$names}";
@@ -259,10 +260,10 @@ class VenueTemplate extends Model
             ->filter(fn($el) => in_array(($el->data_json['seat_type'] ?? ''), ['wheelchair', 'companion'], true));
 
         $accessibleToilets = $elements->where('element_type', 'toilet')
-            ->where('data_json->accessible', true);
+            ->filter(fn($el) => ($el->data_json['accessible'] ?? false) === true);
 
         $musterStations = $elements->where('element_type', 'zone')
-            ->where('data_json->zone_type', 'muster_station');
+            ->filter(fn($el) => ($el->data_json['zone_type'] ?? '') === 'muster_station');
 
         if ($accessibleToilets->isEmpty()) {
             foreach ($wheelchairSeats as $seat) {
@@ -324,21 +325,24 @@ class VenueTemplate extends Model
     }
 
     /**
-     * Find elements within radius (meters) of a reference element
+     * Find elements of specific types within radius (meters) of a reference element
      *
      * @param TemplateElement $center
      * @param float $radiusMeters
-     * @param array $excludedTypes
+     * @param array $elementTypes Types to search for (empty = all types)
      * @return \Illuminate\Support\Collection
      */
-    private function findElementsInRadius(TemplateElement $center, float $radiusMeters, array $excludedTypes = []): \Illuminate\Support\Collection
+    private function findObstructingElementsInRadius(TemplateElement $center, float $radiusMeters, array $elementTypes = []): \Illuminate\Support\Collection
     {
         $radiusCanvas = $radiusMeters / ($this->scale_factor ?? 0.05);
 
-        return $this->elements()
-            ->where('id', '!=', $center->id)
-            ->whereNotIn('element_type', $excludedTypes)
-            ->get()
+        $query = $this->elements()->where('id', '!=', $center->id);
+        
+        if (!empty($elementTypes)) {
+            $query->whereIn('element_type', $elementTypes);
+        }
+
+        return $query->get()
             ->filter(function ($el) use ($center, $radiusCanvas) {
                 $dx = ($el->x + $el->width/2) - ($center->x + $center->width/2);
                 $dy = ($el->y + $el->height/2) - ($center->y + $center->height/2);

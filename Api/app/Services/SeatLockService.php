@@ -76,36 +76,44 @@ class SeatLockService
                     ->pluck('event_id', 'id')
                     ->all();
 
+                // Use upsert for atomic lock creation (handles expired locks and races)
+                $lockData = [];
                 foreach ($elementIds as $elementId) {
-                    // Delete any expired lock
-                    ElementLock::where('event_element_id', $elementId)
-                        ->where('expires_at', '<=', $now)
-                        ->delete();
+                    $lockData[] = [
+                        'event_element_id' => $elementId,
+                        'event_id' => $eventIdMap[$elementId] ?? null,
+                        'lock_key' => $lockKey,
+                        'expires_at' => $expiresAt,
+                        'locked_at' => $now,
+                        'booking_reference' => null,
+                    ];
+                }
 
-                    try {
-                        ElementLock::create([
-                            'event_element_id' => $elementId,
-                            'event_id' => $eventIdMap[$elementId] ?? null,
-                            'lock_key' => $lockKey,
-                            'expires_at' => $expiresAt,
-                            'locked_at' => $now,
-                        ]);
-                    } catch (\Exception $e) {
-                        DB::rollBack();
+                try {
+                    // Upsert atomically handles: 
+                    // 1. Creating new locks
+                    // 2. Overwriting expired locks
+                    // 3. Failing on active locks (via unique constraint)
+                    ElementLock::upsert(
+                        $lockData,
+                        ['event_element_id'],  // Unique constraint column
+                        ['lock_key', 'expires_at', 'locked_at', 'event_id', 'booking_reference']  // Columns to update
+                    );
+                } catch (\Exception $e) {
+                    DB::rollBack();
 
-                        // Check if this is a deadlock or a genuine conflict
-                        if ($this->isDeadlock($e) && $retries < self::MAX_DEADLOCK_RETRIES - 1) {
-                            $retries++;
-                            continue 2; // Retry the entire transaction
-                        }
-
-                        return [
-                            'success' => false,
-                            'message' => 'Seat was just taken by another user',
-                            'conflict_element' => $elementId,
-                            'code' => 'seat_taken',
-                        ];
+                    // Check if this is a deadlock or a genuine conflict (unique constraint violation)
+                    if ($this->isDeadlock($e) && $retries < self::MAX_DEADLOCK_RETRIES - 1) {
+                        $retries++;
+                        continue; // Retry the entire transaction
                     }
+
+                    // Unique constraint violation = seat already locked by another user
+                    return [
+                        'success' => false,
+                        'message' => 'One or more seats were just taken by another user',
+                        'code' => 'seat_taken',
+                    ];
                 }
 
                 DB::commit();

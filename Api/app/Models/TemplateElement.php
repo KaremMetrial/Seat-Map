@@ -77,6 +77,17 @@ class TemplateElement extends Model
         )->withPivot('price_modifier', 'modifier_type');
     }
 
+    // ── Scopes ────────────────────────────────────────────────────────────────
+
+    /**
+     * Scope to only active elements.
+     */
+    public function scopeActive($query)
+    {
+        return $query->where('is_active', true);
+    }
+
+
     // ── Accessors ─────────────────────────────────────────────────────────────
 
     public function getLabelAttribute(): ?string
@@ -130,7 +141,7 @@ class TemplateElement extends Model
             'style_json'          => $this->style_json !== null
                                         ? json_encode($this->style_json)
                                         : null,
-            'is_bookable'         => $this->is_bookable ?? $this->isBookable(),
+            'is_bookable'         => $this->isBookable(),
             'zone_id'             => $zoneId,
             // Explicit timestamps — insert() bypasses Eloquent auto-timestamps
             'created_at'          => $now,

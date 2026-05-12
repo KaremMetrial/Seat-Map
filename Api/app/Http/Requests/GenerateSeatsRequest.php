@@ -30,7 +30,7 @@ class GenerateSeatsRequest extends FormRequest
             'seat_height' => 'required|numeric|min:5|max:200',
             'gap_x' => 'nullable|numeric|min:0|max:50',
             'gap_y' => 'nullable|numeric|min:0|max:50',
-            'row_label_start' => 'nullable|string|max:1|alpha',
+            'row_label_start' => 'nullable|string|max:3',
             'zone_id' => 'nullable|exists:template_zones,id',
             'style' => 'nullable|array',
             'style.fill' => 'nullable|string|regex:/^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/',

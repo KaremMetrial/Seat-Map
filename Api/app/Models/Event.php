@@ -115,20 +115,25 @@ class Event extends Model
      */
     protected function createSnapshot(): void
     {
-        $elements = $this->template->elements;
-        $zoneMap  = $this->buildZoneMap();
+        DB::transaction(function () {
+            $elements = $this->template->elements;
+            $zoneMap  = $this->buildZoneMap();
 
-        $snapshotData = $elements->map(function (TemplateElement $element) use ($zoneMap) {
-            return $element->toEventElement($this->id, $zoneMap[$element->id] ?? null);
+            $snapshotData = $elements->map(function (TemplateElement $element) use ($zoneMap) {
+                return $element->toEventElement($this->id, $zoneMap[$element->id] ?? null);
+            });
+
+            EventElement::insert($snapshotData->toArray());
+
+            $this->updateCapacityCounts();
         });
-
-        EventElement::insert($snapshotData->toArray());
-
-        $this->updateCapacityCounts();
     }
 
     protected function buildZoneMap(): array
     {
+        // Eager load elements on zones to prevent N+1
+        $this->template->loadMissing('zones.elements');
+        
         $map = [];
         foreach ($this->template->zones as $zone) {
             foreach ($zone->elements as $element) {

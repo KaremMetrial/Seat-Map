@@ -127,7 +127,12 @@ class ElementController extends Controller
         $elements = [];
 
         for ($row = 0; $row < $rows; $row++) {
-            $rowLabel = chr(ord($rowLabelStart) + $row);
+            // Support both letter-based (A, B, C...) and number-based (1, 2, 3...) row labels
+            if (is_numeric($rowLabelStart)) {
+                $rowLabel = (string) ((int) $rowLabelStart + $row);
+            } else {
+                $rowLabel = chr(ord($rowLabelStart) + $row);
+            }
 
             for ($seat = 0; $seat < $seatsPerRow; $seat++) {
                 $seatNumber = $seat + 1;
@@ -158,10 +163,12 @@ class ElementController extends Controller
         // Bulk insert
         TemplateElement::insert($elements);
 
-        // Link to zone if provided
+        // Link to zone if provided - use reliable ID-based lookup
         if ($zoneId) {
-            $elementIds = $template->elements()
-                ->latest()
+            // Get the IDs of elements we just inserted by using the max ID before insert
+            $elementIds = TemplateElement::where('template_id', $template->id)
+                ->where('element_type', 'seat')
+                ->orderByDesc('id')
                 ->limit(count($elements))
                 ->pluck('id');
 
