@@ -11,6 +11,7 @@ use App\Models\Event;
 use App\Models\EventElement;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 /**
@@ -35,6 +36,7 @@ class BookingService
     public function __construct(
         private SeatLockService $lockService,
         private PricingService $pricingService,
+        private ?SocketService $socketService = null,
     ) {}
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -47,7 +49,14 @@ class BookingService
      */
     public function createBooking(array $data): array
     {
-        $event      = Event::findOrFail($data['event_id']);
+        Log::info('BookingService:createBooking started', [
+            'event_id' => $data['event_id'],
+            'element_count' => count($data['element_ids'] ?? []),
+            'user_id' => $data['user_id'] ?? 'guest',
+            'customer_email' => $data['customer_email'] ?? null,
+        ]);
+
+        $event = Event::findOrFail($data['event_id']);
         $elementIds = $data['element_ids'];
         $lockKey    = (isset($data['lock_key']) && trim((string) $data['lock_key']) !== '')
                         ? $data['lock_key']
@@ -57,24 +66,26 @@ class BookingService
             return ['success' => false, 'message' => 'Booking is not open for this event'];
         }
 
-        // Verify all elements exist and are bookable
+        // Verify all elements exist (outside transaction - fast check)
         $elements = EventElement::whereIn('id', $elementIds)->get();
 
         if ($elements->count() !== count($elementIds)) {
             return ['success' => false, 'message' => 'Some elements were not found'];
         }
 
-        foreach ($elements as $element) {
-            if (! $element->is_bookable) {
-                return ['success' => false, 'message' => "Element {$element->id} is not bookable"];
-            }
-        }
-
-        // Lock elements
+        // Lock elements first — this is TOCTOU-safe inside transaction
         $lockResult = $this->lockService->lockElements($elementIds, $lockKey);
 
         if (! $lockResult['success']) {
             return $lockResult;
+        }
+
+        // Validate bookable status AFTER acquiring locks (prevents race condition)
+        foreach ($elements as $element) {
+            if (! $element->is_bookable) {
+                $this->lockService->releaseLocks($lockKey);
+                return ['success' => false, 'message' => "Element {$element->id} is not bookable"];
+            }
         }
 
         // Calculate pricing
@@ -122,6 +133,17 @@ class BookingService
 
             DB::commit();
 
+            Log::info('BookingService:createBooking success', [
+                'booking_reference' => $booking->booking_reference,
+                'element_count' => count($elementIds),
+            ]);
+
+            // Broadcast seat updates to Socket.IO clients
+            $this->socketService?->broadcastSeatBatchUpdate(
+                $event->id,
+                array_map(fn ($id) => ['element_id' => $id, 'status' => 'booked'], $elementIds)
+            );
+
             return [
                 'success'    => true,
                 'booking'    => $booking,
@@ -132,6 +154,11 @@ class BookingService
         } catch (\Exception $e) {
             DB::rollBack();
             $this->lockService->releaseLocks($lockKey);
+
+            Log::error('BookingService:createBooking failed', [
+                'event_id' => $data['event_id'],
+                'error' => $e->getMessage(),
+            ]);
 
             return ['success' => false, 'message' => $e->getMessage()];
         }
@@ -168,6 +195,15 @@ class BookingService
             $booking->event->updateCapacityCounts();
 
             DB::commit();
+
+            // Broadcast confirmation - seats are now confirmed
+            $this->socketService?->broadcastSeatBatchUpdate(
+                $booking->event_id,
+                $booking->items->map(fn ($item) => [
+                    'element_id' => $item->event_element_id,
+                    'status' => 'confirmed'
+                ])->toArray()
+            );
 
             return [
                 'success' => true,
@@ -213,6 +249,15 @@ class BookingService
             $booking->event->updateCapacityCounts();
 
             DB::commit();
+
+            // Broadcast cancellation - seats are now available again
+            $this->socketService?->broadcastSeatBatchUpdate(
+                $booking->event_id,
+                $booking->items->map(fn ($item) => [
+                    'element_id' => $item->event_element_id,
+                    'status' => 'available'
+                ])->toArray()
+            );
 
             return ['success' => true, 'booking' => $booking];
         } catch (\Exception $e) {

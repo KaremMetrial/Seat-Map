@@ -38,10 +38,19 @@ class SeatMap3DEngine {
         this.seats = new Map();
         this.selectedSeats = new Set();
         this.hoveredSeat = null;
-        
+
+        // Socket.IO connection
+        this.socket = null;
+        this.eventId = options.eventId || null;
+        this.socketUrl = options.socketUrl || 'http://localhost:3001';
+
         // Control UI elements
         this.controlButtons = new Map();
-        
+
+        // Bound methods for proper event listener cleanup
+        this.boundOnWindowResize = this.onWindowResize.bind(this);
+        this.boundOnKeyDown = this.onKeyDown.bind(this);
+
         this.init();
     }
     
@@ -53,7 +62,92 @@ class SeatMap3DEngine {
         this.setupLighting();
         this.setupEventListeners();
         this.createTouchControls(); // NEW: Touch-friendly controls
+        this.connectSocket(); // Connect to Socket.IO server
         this.animate();
+    }
+
+    // ============================================
+    // SOCKET.IO REAL-TIME CONNECTION
+    // ============================================
+
+    connectSocket() {
+        if (!this.eventId) {
+            console.warn('SeatMap3DEngine: No eventId provided, skipping socket connection');
+            return;
+        }
+
+        // Load Socket.IO client dynamically
+        if (typeof io === 'undefined') {
+            console.warn('SeatMap3DEngine: Socket.IO client not loaded');
+            return;
+        }
+
+        this.socket = io(this.socketUrl, {
+            transports: ['websocket', 'polling'],
+            reconnection: true,
+            reconnectionAttempts: 5,
+            reconnectionDelay: 1000
+        });
+
+        this.socket.on('connect', () => {
+            console.log('SeatMap3DEngine: Connected to socket server');
+            this.socket.emit('join-event', this.eventId);
+        });
+
+        this.socket.on('joined-event', (data) => {
+            console.log('SeatMap3DEngine: Joined event room', data.eventId);
+        });
+
+        // Handle SeatStatusChanged event (single or batch)
+        this.socket.on('SeatStatusChanged', (data) => {
+            console.log('SeatMap3DEngine: Seat status changed', data);
+            if (data.seats && Array.isArray(data.seats)) {
+                data.seats.forEach(seat => this.handleSeatUpdate(seat));
+            }
+        });
+
+        // Handle BookingCreated event
+        this.socket.on('BookingCreated', (data) => {
+            console.log('SeatMap3DEngine: Booking created', data.booking_reference);
+            if (data.element_ids) {
+                data.element_ids.forEach(id => {
+                    this.updateSeatStatus(id, 'booked');
+                });
+            }
+        });
+
+        // Handle SeatsLocked event
+        this.socket.on('SeatsLocked', (data) => {
+            console.log('SeatMap3DEngine: Seats locked', data.element_ids);
+            if (data.element_ids) {
+                data.element_ids.forEach(id => {
+                    this.updateSeatStatus(id, 'locked');
+                });
+            }
+        });
+
+        this.socket.on('disconnect', () => {
+            console.log('SeatMap3DEngine: Disconnected from socket server');
+        });
+
+        this.socket.on('connect_error', (error) => {
+            console.error('SeatMap3DEngine: Socket connection error', error.message);
+        });
+    }
+
+    handleSeatUpdate(data) {
+        const { element_id, status } = data;
+        if (element_id && status) {
+            this.updateSeatStatus(element_id, status);
+        }
+    }
+
+    disconnectSocket() {
+        if (this.socket) {
+            this.socket.emit('leave-event', this.eventId);
+            this.socket.disconnect();
+            this.socket = null;
+        }
     }
     
     setupScene() {
@@ -383,11 +477,11 @@ class SeatMap3DEngine {
     // ============================================
     
     setupEventListeners() {
-        window.addEventListener('resize', () => this.onWindowResize(), false);
+        window.addEventListener('resize', this.boundOnWindowResize, false);
         this.renderer.domElement.addEventListener('click', (e) => this.onMouseClick(e), false);
         this.renderer.domElement.addEventListener('mousemove', (e) => this.onMouseMove(e), false);
-        window.addEventListener('keydown', (e) => this.onKeyDown(e), false);
-        
+        window.addEventListener('keydown', this.boundOnKeyDown, false);
+
         // Touch support
         this.renderer.domElement.addEventListener('touchstart', (e) => this.onTouchStart(e), { passive: false });
         this.renderer.domElement.addEventListener('touchend', (e) => this.onTouchEnd(e), false);
@@ -573,6 +667,9 @@ class SeatMap3DEngine {
             this.hoveredSeat.scale.setScalar(1);
             const glow = this.hoveredSeat.getObjectByName('hoverGlow');
             if (glow) {
+                // Dispose geometry and material to prevent memory leaks
+                if (glow.geometry) glow.geometry.dispose();
+                if (glow.material) glow.material.dispose();
                 this.hoveredSeat.remove(glow);
             }
             this.hoveredSeat = null;
@@ -654,9 +751,10 @@ class SeatMap3DEngine {
             available: 0x0056b3,
             locked: 0xd4a017,
             booked: 0xa94442,
+            confirmed: 0x8b0000,
             selected: 0x28a745
         };
-        
+
         const color = colors[status] || colors.available;
         
         return {
@@ -690,9 +788,29 @@ class SeatMap3DEngine {
     }
     
     destroy() {
-        window.removeEventListener('resize', this.onWindowResize);
+        // Disconnect socket
+        this.disconnectSocket();
+
+        // Remove bound event listeners
+        window.removeEventListener('resize', this.boundOnWindowResize);
+        window.removeEventListener('keydown', this.boundOnKeyDown);
+
+        // Remove renderer listeners
+        this.renderer.domElement.removeEventListener('click', this.onMouseClick);
+        this.renderer.domElement.removeEventListener('mousemove', this.onMouseMove);
+        this.renderer.domElement.removeEventListener('touchstart', this.onTouchStart);
+        this.renderer.domElement.removeEventListener('touchend', this.onTouchEnd);
+
+        // Clear any hover glow
+        this.clearHoverEffect();
+
+        // Dispose Three.js resources
         this.renderer.dispose();
         this.renderer.forceContextLoss();
+
+        // Clear seats map
+        this.seats.clear();
+        this.selectedSeats.clear();
     }
 }
 

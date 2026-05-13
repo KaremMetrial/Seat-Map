@@ -1,10 +1,10 @@
 <?php
 
 use Illuminate\Support\Facades\Schedule;
-use App\Models\ElementLock;
+use App\Console\Commands\CleanupExpiredLocks;
 
 // Clean up expired seat locks every minute
-Schedule::call(fn() => ElementLock::cleanup())
+Schedule::command(CleanupExpiredLocks::class)
     ->everyMinute()
     ->name('cleanup-expired-locks')
     ->withoutOverlapping();
