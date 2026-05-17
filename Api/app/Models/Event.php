@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use App\Jobs\RebuildSeatCache;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -96,6 +97,7 @@ class Event extends Model
 
     /**
      * Publish the event — creates an immutable snapshot of template elements.
+     * Dispatches a queue job to warm the Redis seat cache.
      */
     public function publish(): void
     {
@@ -108,6 +110,10 @@ class Event extends Model
         $this->status         = 'published';
         $this->snapshotted_at = Carbon::now();
         $this->save();
+
+        // Warm Redis cache in background (non-blocking)
+        // For 100K seats, this takes ~10-30 seconds in queue
+        RebuildSeatCache::dispatch($this->id);
     }
 
     /**

@@ -1,58 +1,87 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# Seat-Map API Documentation
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+**Laravel Seat Booking API**
 
-## About Laravel
+## Overview
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+This is the backend API for the Seat-Map venue seat mapping and booking platform. It provides endpoints for managing venues, templates, events, and bookings.
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
-
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
-
-## Learning Laravel
-
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
-
-In addition, [Laracasts](https://laracasts.com) contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
-
-You can also watch bite-sized lessons with real-world projects on [Laravel Learn](https://laravel.com/learn), where you will be guided through building a Laravel application from scratch while learning PHP fundamentals.
-
-## Agentic Development
-
-Laravel's predictable structure and conventions make it ideal for AI coding agents like Claude Code, Cursor, and GitHub Copilot. Install [Laravel Boost](https://laravel.com/docs/ai) to supercharge your AI workflow:
+## Quick Start
 
 ```bash
-composer require laravel/boost --dev
+# Install dependencies
+composer install
 
-php artisan boost:install
+# Setup environment
+cp .env.example .env
+php artisan key:generate
+
+# Run migrations
+php artisan migrate:fresh --seed
+
+# Start development server
+php artisan serve
 ```
 
-Boost provides your agent 15+ tools and skills that help agents build Laravel applications while following best practices.
+## Database Documentation
 
-## Contributing
+Complete data models and migrations documentation is available in the [root README.md](../../README.md).
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+### Key Entities
 
-## Code of Conduct
+| Entity | Description |
+|--------|-------------|
+| **Venues** | Physical locations (theaters, stadiums, custom venues) |
+| **Templates** | Reusable seat map layouts |
+| **Elements** | Seats, stages, entrances (visual components) |
+| **Zones** | Pricing zones (VIP, Standard, etc.) |
+| **Events** | Published events with immutable snapshots |
+| **Bookings** | Customer bookings with checkout flow |
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+### Booking Flow
 
-## Security Vulnerabilities
+```
+1. User selects seat → Check availability
+2. Create ElementLock (temporary hold)
+3. Show checkout form
+4. Create Booking + BookingItems
+5. Delete ElementLock
+```
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+## API Endpoints
 
-## License
+### Venues
+- `GET /api/venues` - List all venues
+- `GET /api/venues/{slug}` - Get venue details
+- `POST /api/venues` - Create venue (admin)
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+### Events
+- `GET /api/events` - List published events
+- `GET /api/events/{slug}` - Event details with seat map
+- `POST /api/events` - Create event (admin)
+- `POST /api/events/{slug}/publish` - Publish event
+
+### Bookings
+- `POST /api/bookings` - Create booking
+- `GET /api/bookings/{reference}` - Booking status
+- `POST /api/bookings/{reference}/confirm` - Confirm booking
+
+## Development
+
+```bash
+# Run tests
+php artisan test
+
+# Check code style
+./vendor/bin/pint
+
+# Database seeders
+php artisan db:seed --class=SeatmapSeeder
+```
+
+## Architecture Notes
+
+- **Event Elements** are immutable snapshots taken at publish time
+- **ElementLocks** prevent race conditions during checkout
+- **BookingItems** use unique constraints to prevent double-booking
+- All pricing is stored in USD with 2 decimal precision

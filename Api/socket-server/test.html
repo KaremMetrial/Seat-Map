@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SeatMap Socket Test</title>
+    <style>
+        body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #0f0; }
+        #log { background: #000; padding: 15px; border-radius: 8px; height: 400px; overflow-y: auto; }
+        .event { margin: 5px 0; padding: 8px; border-left: 3px solid #0f0; background: #111; }
+        .connected { color: #0f0; }
+        .disconnected { color: #f00; }
+        button { padding: 10px 20px; margin: 5px; cursor: pointer; background: #0f0; border: none; border-radius: 4px; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>SeatMap Socket.IO Test</h1>
+    <div id="status" class="disconnected">Disconnected</div>
+    <br>
+    <button onclick="joinEvent(1)">Join Event 1</button>
+    <button onclick="joinEvent(2)">Join Event 2</button>
+    <button onclick="leaveEvent(1)">Leave Event 1</button>
+    <br><br>
+    <div id="log"></div>
+
+    <script src="http://localhost:3001/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io('http://localhost:3001');
+        const log = document.getElementById('log');
+        const status = document.getElementById('status');
+
+        function addLog(msg) {
+            const div = document.createElement('div');
+            div.className = 'event';
+            div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            log.prepend(div);
+        }
+
+        socket.on('connect', () => {
+            status.textContent = 'Connected ✓';
+            status.className = 'connected';
+            addLog('Connected to socket server');
+        });
+
+        socket.on('disconnect', () => {
+            status.textContent = 'Disconnected ✗';
+            status.className = 'disconnected';
+            addLog('Disconnected');
+        });
+
+        socket.on('joined-event', (data) => {
+            addLog(`Joined event ${data.eventId}`);
+        });
+
+        socket.on('SeatStatusChanged', (data) => {
+            addLog(`SeatStatusChanged: ${JSON.stringify(data)}`);
+            data.seats?.forEach(s => {
+                addLog(`  Seat ${s.element_id} → ${s.status}`);
+            });
+        });
+
+        socket.on('BookingCreated', (data) => {
+            addLog(`BookingCreated: ${data.booking_reference}, seats: [${data.element_ids}]`);
+        });
+
+        socket.on('SeatsLocked', (data) => {
+            addLog(`SeatsLocked: seats [${data.element_ids}], lock: ${data.lock_key}`);
+        });
+
+        function joinEvent(id) {
+            socket.emit('join-event', id);
+        }
+
+        function leaveEvent(id) {
+            socket.emit('leave-event', id);
+        }
+    </script>
+</body>
+</html>

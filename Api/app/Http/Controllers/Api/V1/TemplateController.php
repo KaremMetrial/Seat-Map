@@ -5,18 +5,22 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\StoreTemplateRequest;
 use App\Models\TemplateElement;
 use App\Models\Venue;
 use App\Models\VenueTemplate;
-use App\Http\Requests\StoreTemplateRequest;
+use App\Services\TemplateCacheService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 class TemplateController extends Controller
 {
+    public function __construct(
+        private TemplateCacheService $templateCache,
+    ) {}
+
     /**
      * GET /api/v1/venues/{venue}/templates
-     * List all templates for a venue.
      */
     public function index(Venue $venue): JsonResponse
     {
@@ -28,20 +32,18 @@ class TemplateController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => $templates,
+            'data'    => $templates,
         ]);
     }
 
     /**
      * POST /api/v1/venues/{venue}/templates
-     * Create a new template.
      */
     public function store(StoreTemplateRequest $request, Venue $venue): JsonResponse
     {
         $validated = $request->validated();
         $validated['venue_id'] = $venue->id;
 
-        // If this is set as default, unset other defaults
         if ($validated['is_default'] ?? false) {
             $venue->templates()->update(['is_default' => false]);
         }
@@ -50,38 +52,39 @@ class TemplateController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => $template,
+            'data'    => $template,
         ], 201);
     }
 
     /**
      * GET /api/v1/templates/{template}
-     * Get template with elements and zones.
      */
     public function show(VenueTemplate $template): JsonResponse
     {
-        $template->load(['elements' => fn($q) => $q->orderBy('z_index'), 'zones']);
+        $template->load(['elements' => fn ($q) => $q->orderBy('z_index'), 'zones']);
 
         return response()->json([
             'success' => true,
-            'data' => [
-                'template' => $template,
-                'elements_tree' => $template->getElementsTree(),
+            'data'    => [
+                'template'       => $template,
+                'elements_tree'  => $template->getElementsTree(),
                 'elements_count' => $template->elements()->count(),
-                'zones_count' => $template->zones()->count(),
+                'zones_count'    => $template->zones()->count(),
             ],
         ]);
     }
 
     /**
      * PUT /api/v1/templates/{template}
-     * Update a template.
+     *
+     * When a template is updated, invalidate cache for all published events
+     * that use this template. The cache will be rebuilt in the background
+     * via queue jobs.
      */
     public function update(StoreTemplateRequest $request, VenueTemplate $template): JsonResponse
     {
         $validated = $request->validated();
 
-        // If this is set as default, unset other defaults
         if ($validated['is_default'] ?? false) {
             $template->venue->templates()
                 ->where('id', '!=', $template->id)
@@ -90,27 +93,30 @@ class TemplateController extends Controller
 
         $template->update($validated);
 
+        // Invalidate cache for all published events using this template
+        $invalidated = $this->templateCache->invalidateTemplateCache($template->id);
+
         return response()->json([
             'success' => true,
-            'data' => $template,
+            'data'    => $template,
+            'meta'    => [
+                'cache_invalidated'          => $invalidated > 0,
+                'affected_published_events'  => $invalidated,
+            ],
         ]);
     }
 
     /**
      * DELETE /api/v1/templates/{template}
-     * Soft delete a template.
+     *
+     * Prevents deletion if template is used by published events.
      */
     public function destroy(VenueTemplate $template): JsonResponse
     {
-        // Check if template is used by any published events
-        $usedByEvents = $template->events()
-            ->where('status', 'published')
-            ->exists();
-
-        if ($usedByEvents) {
+        if ($this->templateCache->templateHasPublishedEvents($template->id)) {
             return response()->json([
                 'success' => false,
-                'message' => 'Cannot delete template used by published events',
+                'message' => 'Cannot delete template used by published events. Unpublish or delete those events first.',
             ], 422);
         }
 
@@ -124,17 +130,16 @@ class TemplateController extends Controller
 
     /**
      * POST /api/v1/templates/{template}/duplicate
-     * Duplicate a template with all its elements and zones.
      */
     public function duplicate(VenueTemplate $template): JsonResponse
     {
         $newTemplate = $template->replicate();
         $newTemplate->name = $template->name . ' (Copy)';
-        $newTemplate->slug = null; // Will be auto-generated
+        $newTemplate->slug = null;
         $newTemplate->is_default = false;
         $newTemplate->save();
 
-        // Duplicate elements using bulk insert (avoid N+1)
+        // Duplicate elements using bulk insert
         $elementsData = $template->elements->map(function ($element) use ($newTemplate) {
             $new = $element->replicate();
             $new->template_id = $newTemplate->id;
@@ -145,7 +150,7 @@ class TemplateController extends Controller
             TemplateElement::insert($elementsData);
         }
 
-        // Duplicate zones and build mapping
+        // Duplicate zones
         $zoneMap = [];
         foreach ($template->zones as $zone) {
             $newZone = $zone->replicate();
@@ -157,7 +162,7 @@ class TemplateController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Template duplicated successfully',
-            'data' => $newTemplate->load('elements', 'zones'),
+            'data'    => $newTemplate->load('elements', 'zones'),
         ], 201);
     }
 }

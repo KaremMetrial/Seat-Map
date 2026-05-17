@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Jobs\UpdateSeatStatus;
 use App\Models\Booking;
 use App\Models\BookingItem;
 use App\Models\ElementLock;
@@ -17,6 +18,12 @@ use Illuminate\Support\Str;
 /**
  * Booking Service — orchestrates the full booking lifecycle.
  *
+ * Performance optimizations for 100K+ seats:
+ * - Seat status stored in Redis cache (O(1) lookups)
+ * - Cache updates dispatched as queue jobs (non-blocking)
+ * - Socket events dispatched as queue jobs (non-blocking)
+ * - DB transaction only wraps DB operations, not cache/socket
+ *
  * Flow:
  *   1. Validate event is open for booking
  *   2. Verify all requested elements exist and are bookable
@@ -24,12 +31,15 @@ use Illuminate\Support\Str;
  *   4. Calculate pricing
  *   5. Create booking + booking_items in a transaction
  *   6. Link locks to the booking reference
+ *   7. Dispatch cache update + socket broadcast (queued)
  *
  * Confirm flow (after payment):
- *   7. Mark booking confirmed, delete locks
+ *   8. Mark booking confirmed, delete locks
+ *   9. Dispatch cache update + socket broadcast (queued)
  *
  * Cancel flow:
- *   8. Mark booking cancelled, cancel items, delete locks
+ *  10. Mark booking cancelled, cancel items, delete locks
+ *  11. Dispatch cache update + socket broadcast (queued)
  */
 class BookingService
 {
@@ -37,6 +47,7 @@ class BookingService
         private SeatLockService $lockService,
         private PricingService $pricingService,
         private ?SocketService $socketService = null,
+        private ?SeatCacheService $cacheService = null,
     ) {}
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -138,8 +149,8 @@ class BookingService
                 'element_count' => count($elementIds),
             ]);
 
-            // Broadcast seat updates to Socket.IO clients
-            $this->socketService?->broadcastSeatBatchUpdate(
+            // Update Redis cache + dispatch socket event (non-blocking queue)
+            $this->dispatchSeatUpdate(
                 $event->id,
                 array_map(fn ($id) => ['element_id' => $id, 'status' => 'booked'], $elementIds)
             );
@@ -196,14 +207,13 @@ class BookingService
 
             DB::commit();
 
-            // Broadcast confirmation - seats are now confirmed
-            $this->socketService?->broadcastSeatBatchUpdate(
-                $booking->event_id,
-                $booking->items->map(fn ($item) => [
-                    'element_id' => $item->event_element_id,
-                    'status' => 'confirmed'
-                ])->toArray()
-            );
+            // Update Redis cache + dispatch socket event (non-blocking queue)
+            $seats = $booking->items->map(fn ($item) => [
+                'element_id' => $item->event_element_id,
+                'status' => 'confirmed'
+            ])->toArray();
+
+            $this->dispatchSeatUpdate($booking->event_id, $seats);
 
             return [
                 'success' => true,
@@ -250,14 +260,13 @@ class BookingService
 
             DB::commit();
 
-            // Broadcast cancellation - seats are now available again
-            $this->socketService?->broadcastSeatBatchUpdate(
-                $booking->event_id,
-                $booking->items->map(fn ($item) => [
-                    'element_id' => $item->event_element_id,
-                    'status' => 'available'
-                ])->toArray()
-            );
+            // Update Redis cache + dispatch socket event (non-blocking queue)
+            $seats = $booking->items->map(fn ($item) => [
+                'element_id' => $item->event_element_id,
+                'status' => 'available'
+            ])->toArray();
+
+            $this->dispatchSeatUpdate($booking->event_id, $seats);
 
             return ['success' => true, 'booking' => $booking];
         } catch (\Exception $e) {
@@ -267,51 +276,25 @@ class BookingService
         }
     }
 
+    // ── Private Helpers ──────────────────────────────────────────────────────
+
     /**
-     * Get the full seat map for an event.
-     * Uses batch hydration — exactly 4 queries regardless of element count.
-     *
-     * @return array{event: array, elements: mixed, zones: mixed}
+     * Dispatch seat status update: update Redis cache + broadcast socket event.
+     * Uses queue job for non-blocking execution.
      */
-    public function getSeatMap(Event $event): array
+    private function dispatchSeatUpdate(int $eventId, array $seats): void
     {
-        // Eager-load template so canvas dimensions cost 0 extra queries
-        $event->loadMissing('template.zones');
+        if (empty($seats)) {
+            return;
+        }
 
-        $elements = $event->eventElements()->orderBy('z_index')->get();
+        // Update Redis cache immediately (fast, < 10ms)
+        $this->cacheService?->setSeatStatuses($eventId, $seats);
 
-        // Resolve booking_status for the whole collection in 2 queries (not 2N)
-        EventElement::hydrateBookingStatus($elements);
+        // Also update via queue for socket broadcast (non-blocking)
+        UpdateSeatStatus::dispatch($eventId, $seats);
 
-        return [
-            'event' => [
-                'id'       => $event->id,
-                'title'    => $event->title,
-                'start_at' => $event->start_at,
-                'canvas'   => [
-                    'width'            => $event->template->canvas_width,
-                    'height'           => $event->template->canvas_height,
-                    'background_image' => $event->template->background_image,
-                    'background_color' => $event->template->background_color,
-                ],
-            ],
-            'elements' => $elements->map(fn (EventElement $el) => [
-                'id'          => $el->id,
-                'type'        => $el->element_type,
-                'x'           => (float) $el->x,
-                'y'           => (float) $el->y,
-                'width'       => (float) $el->width,
-                'height'      => (float) $el->height,
-                'rotation'    => (float) $el->rotation,
-                'z_index'     => $el->z_index,
-                'parent_id'   => $el->parent_id,
-                'data'        => $el->data_json,
-                'style'       => $el->style_json,
-                'is_bookable' => $el->is_bookable,
-                'zone_id'     => $el->zone_id,
-                'status'      => $el->booking_status,
-            ]),
-            'zones' => $event->template->zones,
-        ];
+        // Legacy: direct socket service call (kept for backward compatibility)
+        $this->socketService?->broadcastSeatBatchUpdate($eventId, $seats);
     }
 }

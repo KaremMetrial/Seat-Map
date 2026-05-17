@@ -5,20 +5,24 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
-use App\Models\TemplateElement;
-use App\Models\VenueTemplate;
-use App\Http\Requests\StoreElementRequest;
 use App\Http\Requests\BulkStoreElementsRequest;
 use App\Http\Requests\GenerateSeatsRequest;
+use App\Http\Requests\StoreElementRequest;
+use App\Models\TemplateElement;
+use App\Models\VenueTemplate;
+use App\Services\TemplateCacheService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class ElementController extends Controller
 {
+    public function __construct(
+        private TemplateCacheService $templateCache,
+    ) {}
+
     /**
      * GET /api/v1/templates/{template}/elements
-     * List all elements in a template.
      */
     public function index(VenueTemplate $template): JsonResponse
     {
@@ -29,8 +33,8 @@ class ElementController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => [
-                'elements' => $elements,
+            'data'    => [
+                'elements'      => $elements,
                 'elements_tree' => $template->getElementsTree(),
             ],
         ]);
@@ -38,7 +42,8 @@ class ElementController extends Controller
 
     /**
      * POST /api/v1/templates/{template}/elements
-     * Create a single element.
+     *
+     * Creates a single element and invalidates cache for affected events.
      */
     public function store(StoreElementRequest $request, VenueTemplate $template): JsonResponse
     {
@@ -48,15 +53,23 @@ class ElementController extends Controller
 
         $element = TemplateElement::create($validated);
 
+        // Invalidate cache for published events using this template
+        $invalidated = $this->templateCache->invalidateTemplateCache($template->id);
+
         return response()->json([
             'success' => true,
-            'data' => $element,
+            'data'    => $element,
+            'meta'    => [
+                'cache_invalidated'          => $invalidated > 0,
+                'affected_published_events'  => $invalidated,
+            ],
         ], 201);
     }
 
     /**
      * POST /api/v1/templates/{template}/elements/bulk
-     * Create multiple elements at once (for batch seat creation).
+     *
+     * Bulk creates elements and invalidates cache once.
      */
     public function bulkStore(BulkStoreElementsRequest $request, VenueTemplate $template): JsonResponse
     {
@@ -85,21 +98,28 @@ class ElementController extends Controller
             ];
         }
 
-        // Bulk insert
         TemplateElement::insert($elements);
+
+        // Invalidate cache once for all new elements
+        $invalidated = $this->templateCache->invalidateTemplateCache($template->id);
 
         return response()->json([
             'success' => true,
             'message' => count($elements) . ' elements created successfully',
-            'data' => [
+            'data'    => [
                 'count' => count($elements),
+            ],
+            'meta' => [
+                'cache_invalidated'          => $invalidated > 0,
+                'affected_published_events'  => $invalidated,
             ],
         ], 201);
     }
 
     /**
      * POST /api/v1/templates/{template}/elements/generate-seats
-     * Generate seats in a grid pattern.
+     *
+     * Generates seats in a grid pattern and invalidates cache.
      */
     public function generateSeats(GenerateSeatsRequest $request, VenueTemplate $template): JsonResponse
     {
@@ -127,7 +147,6 @@ class ElementController extends Controller
         $elements = [];
 
         for ($row = 0; $row < $rows; $row++) {
-            // Support both letter-based (A, B, C...) and number-based (1, 2, 3...) row labels
             if (is_numeric($rowLabelStart)) {
                 $rowLabel = (string) ((int) $rowLabelStart + $row);
             } else {
@@ -160,19 +179,17 @@ class ElementController extends Controller
             }
         }
 
-        // Bulk insert
         TemplateElement::insert($elements);
 
-        // Link to zone if provided - use reliable ID-based lookup
+        // Link to zone if provided
         if ($zoneId) {
-            // Get the IDs of elements we just inserted by using the max ID before insert
             $elementIds = TemplateElement::where('template_id', $template->id)
                 ->where('element_type', 'seat')
                 ->orderByDesc('id')
                 ->limit(count($elements))
                 ->pluck('id');
 
-            $zoneMap = $elementIds->map(fn($id) => [
+            $zoneMap = $elementIds->map(fn ($id) => [
                 'template_element_id' => $id,
                 'template_zone_id' => $zoneId,
                 'created_at' => $now,
@@ -182,20 +199,26 @@ class ElementController extends Controller
             DB::table('element_zone_map')->insert($zoneMap);
         }
 
+        // Invalidate cache for published events
+        $invalidated = $this->templateCache->invalidateTemplateCache($template->id);
+
         return response()->json([
             'success' => true,
             'message' => count($elements) . ' seats generated successfully',
-            'data' => [
+            'data'    => [
                 'count' => count($elements),
                 'rows' => $rows,
                 'seats_per_row' => $seatsPerRow,
+            ],
+            'meta' => [
+                'cache_invalidated'          => $invalidated > 0,
+                'affected_published_events'  => $invalidated,
             ],
         ], 201);
     }
 
     /**
      * GET /api/v1/elements/{element}
-     * Get element details.
      */
     public function show(TemplateElement $element): JsonResponse
     {
@@ -203,39 +226,48 @@ class ElementController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => $element,
+            'data'    => $element,
         ]);
     }
 
     /**
      * PUT /api/v1/elements/{element}
-     * Update an element.
+     *
+     * Updates an element and invalidates cache for affected events.
      */
     public function update(StoreElementRequest $request, TemplateElement $element): JsonResponse
     {
         $validated = $request->validated();
         $element->update($validated);
 
+        // Invalidate cache for published events using this template
+        $invalidated = $this->templateCache->invalidateTemplateCache($element->template_id);
+
         return response()->json([
             'success' => true,
-            'data' => $element->fresh(),
+            'data'    => $element->fresh(),
+            'meta'    => [
+                'cache_invalidated'          => $invalidated > 0,
+                'affected_published_events'  => $invalidated,
+            ],
         ]);
     }
 
     /**
      * PUT /api/v1/elements/bulk-update
-     * Update multiple elements (position, style, etc.).
+     *
+     * Bulk updates elements and invalidates cache once.
      */
     public function bulkUpdate(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'element_ids' => 'required|array|min:1|max:500',
+            'element_ids'   => 'required|array|min:1|max:500',
             'element_ids.*' => 'required|exists:template_elements,id',
-            'updates' => 'required|array',
-            'updates.x' => 'nullable|numeric',
-            'updates.y' => 'nullable|numeric',
+            'updates'       => 'required|array',
+            'updates.x'     => 'nullable|numeric',
+            'updates.y'     => 'nullable|numeric',
             'updates.style_json' => 'nullable|array',
-            'updates.is_active' => 'nullable|boolean',
+            'updates.is_active'  => 'nullable|boolean',
         ]);
 
         $updates = [];
@@ -251,44 +283,84 @@ class ElementController extends Controller
             ], 422);
         }
 
+        // Get unique template IDs before update
+        $templateIds = TemplateElement::whereIn('id', $validated['element_ids'])
+            ->distinct()
+            ->pluck('template_id');
+
         $count = TemplateElement::whereIn('id', $validated['element_ids'])->update($updates);
+
+        // Invalidate cache for all affected templates
+        $totalInvalidated = 0;
+        foreach ($templateIds as $templateId) {
+            $totalInvalidated += $this->templateCache->invalidateTemplateCache($templateId);
+        }
 
         return response()->json([
             'success' => true,
             'message' => "{$count} elements updated",
+            'meta'    => [
+                'cache_invalidated'          => $totalInvalidated > 0,
+                'affected_published_events'  => $totalInvalidated,
+            ],
         ]);
     }
 
     /**
      * DELETE /api/v1/elements/{element}
-     * Delete an element.
+     *
+     * Deletes an element and invalidates cache for affected events.
      */
     public function destroy(TemplateElement $element): JsonResponse
     {
+        $templateId = $element->template_id;
         $element->delete();
+
+        // Invalidate cache for published events using this template
+        $invalidated = $this->templateCache->invalidateTemplateCache($templateId);
 
         return response()->json([
             'success' => true,
             'message' => 'Element deleted successfully',
+            'meta'    => [
+                'cache_invalidated'          => $invalidated > 0,
+                'affected_published_events'  => $invalidated,
+            ],
         ]);
     }
 
     /**
      * POST /api/v1/elements/bulk-delete
-     * Delete multiple elements.
+     *
+     * Bulk deletes elements and invalidates cache once.
      */
     public function bulkDestroy(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'element_ids' => 'required|array|min:1|max:500',
+            'element_ids'   => 'required|array|min:1|max:500',
             'element_ids.*' => 'required|exists:template_elements,id',
         ]);
 
+        // Get unique template IDs before delete
+        $templateIds = TemplateElement::whereIn('id', $validated['element_ids'])
+            ->distinct()
+            ->pluck('template_id');
+
         $count = TemplateElement::whereIn('id', $validated['element_ids'])->delete();
+
+        // Invalidate cache for all affected templates
+        $totalInvalidated = 0;
+        foreach ($templateIds as $templateId) {
+            $totalInvalidated += $this->templateCache->invalidateTemplateCache($templateId);
+        }
 
         return response()->json([
             'success' => true,
             'message' => "{$count} elements deleted",
+            'meta'    => [
+                'cache_invalidated'          => $totalInvalidated > 0,
+                'affected_published_events'  => $totalInvalidated,
+            ],
         ]);
     }
 }

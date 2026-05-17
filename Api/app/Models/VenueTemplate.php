@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Support\Str;
+use Illuminate\Support\Collection;
 
 class VenueTemplate extends Model
 {
@@ -53,8 +54,17 @@ class VenueTemplate extends Model
         parent::boot();
 
         static::creating(function (self $template): void {
-            if (empty($template->slug)) {
-                $template->slug = Str::slug($template->name);
+            if (!$template->slug) {
+                $base = Str::slug($template->name);
+                $slug = $base;
+                $i = 1;
+
+                while (self::where('slug', $slug)->exists()) {
+                    $slug = "{$base}-{$i}";
+                    $i++;
+                }
+
+                $template->slug = $slug;
             }
         });
     }
@@ -88,17 +98,57 @@ class VenueTemplate extends Model
      *
      * @return array<int, mixed>
      */
+
     public function getElementsTree(): array
     {
-        $elements = $this->elements()->with('children')->get();
-
-        return $elements
+        return $this->elements()
+            ->with('children')
             ->whereNull('parent_id')
-            ->sortBy('z_index')
-            ->values()
+            ->orderBy('z_index')
+            ->get()
             ->toArray();
     }
+    private function findObstructions($center, float $radiusM, Collection $elements): Collection
+    {
+        $radius = $radiusM / $this->scaleFactor();
 
+        $cx = $center->x + ($center->width / 2);
+        $cy = $center->y + ($center->height / 2);
+
+        return $elements->filter(function ($el) use ($center, $radius, $cx, $cy) {
+
+            if ($el->id === $center->id) {
+                return false;
+            }
+
+            $ex = $el->x + ($el->width / 2);
+            $ey = $el->y + ($el->height / 2);
+
+            $dx = $cx - $ex;
+            $dy = $cy - $ey;
+
+            return sqrt($dx * $dx + $dy * $dy) <= $radius;
+        });
+    }
+        public function findNearestDistance($reference, Collection $targets): float
+    {
+        $rx = $reference->x + ($reference->width / 2);
+        $ry = $reference->y + ($reference->height / 2);
+
+        $min = INF;
+
+        foreach ($targets as $t) {
+
+            $tx = $t->x + ($t->width / 2);
+            $ty = $t->y + ($t->height / 2);
+
+            $dist = sqrt(($rx - $tx) ** 2 + ($ry - $ty) ** 2);
+
+            $min = min($min, $dist);
+        }
+
+        return $min;
+    }
     // ── Maritime Compliance ────────────────────────────────────────────────────
 
     /**
@@ -107,10 +157,14 @@ class VenueTemplate extends Model
      * @param float $canvasValue
      * @return float
      */
-    public function toMeters(float $canvasValue): float
+    public function scaleFactor(): float
     {
-        $factor = $this->scale_factor ?? 0.05; // default: 1 unit = 5cm
-        return $canvasValue * $factor;
+        return (float) ($this->scale_factor ?? 0.05);
+    }
+
+    public function toMeters(float $value): float
+    {
+        return $value * $this->scaleFactor();
     }
 
     /**
@@ -118,17 +172,22 @@ class VenueTemplate extends Model
      *
      * @return \Illuminate\Support\Collection<int, array>
      */
-    public function getBookableElementsWithMetrics()
+    public function getBookableElementsWithMetrics(): Collection
     {
         return $this->elements()
             ->where('is_active', true)
             ->whereIn('element_type', ['seat', 'table', 'standing_zone'])
             ->get()
             ->map(function ($el) {
+
+                $widthM = $this->toMeters($el->width);
+                $heightM = $this->toMeters($el->height);
+
                 return [
                     'id' => $el->id,
-                    'label' => $el->data_json['label'] ?? "Element {$el->id}",
+                    'label' => $this->data($el)['label'] ?? "Element {$el->id}",
                     'type' => $el->element_type,
+
                     'canvas' => [
                         'x' => $el->x,
                         'y' => $el->y,
@@ -136,16 +195,21 @@ class VenueTemplate extends Model
                         'height' => $el->height,
                         'area_units' => $el->width * $el->height,
                     ],
+
                     'metrics' => [
-                        'width_m' => $this->toMeters($el->width),
-                        'depth_m' => $this->toMeters($el->height),
-                        'area_sqm' => $this->toMeters($el->width) * $this->toMeters($el->height),
+                        'width_m' => $widthM,
+                        'depth_m' => $heightM,
+                        'area_sqm' => $widthM * $heightM,
                     ],
+
                     'z_index' => $el->z_index,
                 ];
             });
     }
-
+    private function data($el): array
+    {
+        return $el->data_json ?? [];
+    }
     /**
      * Run full maritime compliance check
      *
@@ -160,6 +224,7 @@ class VenueTemplate extends Model
     public function marineComplianceCheck(): array
     {
         $elements = $this->elements()->where('is_active', true)->get();
+
         $violations = [];
         $summary = [
             'total_elements' => $elements->count(),
@@ -171,71 +236,71 @@ class VenueTemplate extends Model
             'accessibility_violations' => 0,
         ];
 
-        // Sailor/cabin minimum area per IMO (6m² standard, 10m² accessible)
-        $MIN_CABIN_AREA_SQM = 6.0;
-        $MIN_ACCESSIBLE_AREA_SQM = 10.0;
-        $MIN_AISLE_WIDTH_M = 1.2;
-        $MIN_EMERGENCY_WIDTH_M = 0.9;
-        $EXIT_BUFFER_M = 1.0;
+        $MIN_AREA = 6.0;
+        $MIN_ACCESSIBLE = 10.0;
+        $MIN_AISLE = 1.2;
+        $MIN_EMERGENCY = 0.9;
+        $EXIT_BUFFER = 1.0;
 
         foreach ($elements as $el) {
-            switch ($el->element_type) {
-                case 'seat':
-                    $areaSqm = $this->toMeters($el->width * $el->height);
-                    $summary['seats_checked']++;
 
-                    $seatType = $el->data_json['seat_type'] ?? 'regular';
-                    $minRequired = ($seatType === 'wheelchair' || $seatType === 'companion')
-                                   ? $MIN_ACCESSIBLE_AREA_SQM
-                                   : $MIN_CABIN_AREA_SQM;
+            $data = $this->data($el);
 
-                    if ($areaSqm < $minRequired) {
-                        $summary['area_violations']++;
-                        $violations[] = "Cabin '{$el->data_json['label']}': {$areaSqm}m² < minimum {$minRequired}m² for {$seatType} type";
-                    }
-                    break;
+            /* ───── Seats ───── */
+            if ($el->element_type === 'seat') {
 
-                case 'aisle':
-                case 'corridor':
-                    $widthM = $this->toMeters($el->width);
-                    $summary['aisles_checked']++;
+                $summary['seats_checked']++;
 
-                    $isEmergency = $el->data_json['is_emergency'] ?? false;
-                    $minWidth = $isEmergency ? $MIN_EMERGENCY_WIDTH_M : $MIN_AISLE_WIDTH_M;
+                $widthM = $this->toMeters($el->width);
+                $heightM = $this->toMeters($el->height);
 
-                    if ($widthM < $minWidth) {
-                        $summary['width_violations']++;
-                        $violations[] = "Aisle '{$el->data_json['label']}': width {$widthM}m < minimum {$minWidth}m";
-                    }
-                    break;
+                $area = $widthM * $heightM;
 
-                case 'entrance':
-                case 'emergency_exit':
-                    $summary['exits_checked']++;
-                    // Check clearance zone (1m radius must be free of permanent obstructions)
-                    // Pass empty array - we want to FIND obstructions, not exclude them
-                    $clearanceRadiusM = $EXIT_BUFFER_M;
-                    $obstructing = $this->findObstructingElementsInRadius($el, $clearanceRadiusM, ['seat', 'table', 'stage']);
-                    if ($obstructing->isNotEmpty()) {
-                        $names = $obstructing->pluck('data_json.label')->join(', ');
-                        $violations[] = "Exit '{$el->data_json['label']}': clearance zone obstructed by {$names}";
-                    }
-                    break;
+                $type = $data['seat_type'] ?? 'regular';
+
+                $min = in_array($type, ['wheelchair', 'companion'], true)
+                    ? $MIN_ACCESSIBLE
+                    : $MIN_AREA;
+
+                if ($area < $min) {
+                    $summary['area_violations']++;
+                    $violations[] = "Seat '{$data['label']}' too small ({$area}m² < {$min}m²)";
+                }
             }
-        }
 
-        // Separate accessibility proximity check (requires all elements)
-        $accessibilityViolations = $this->validateAccessibilityProximity($elements);
-        foreach ($accessibilityViolations as $av) {
-            $summary['accessibility_violations']++;
-            $violations[] = $av;
+            /* ───── Aisles ───── */
+            if (in_array($el->element_type, ['aisle', 'corridor'], true)) {
+
+                $summary['aisles_checked']++;
+
+                $widthM = $this->toMeters($el->width);
+                $min = ($data['is_emergency'] ?? false) ? $MIN_EMERGENCY : $MIN_AISLE;
+
+                if ($widthM < $min) {
+                    $summary['width_violations']++;
+                    $violations[] = "Aisle '{$data['label']}' too narrow ({$widthM}m < {$min}m)";
+                }
+            }
+
+            /* ───── Exits ───── */
+            if (in_array($el->element_type, ['entrance', 'emergency_exit'], true)) {
+
+                $summary['exits_checked']++;
+
+                $obstructing = $this->findObstructions($el, $EXIT_BUFFER, $elements);
+
+                if ($obstructing->isNotEmpty()) {
+                    $names = $obstructing->map(fn ($o) => $this->data($o)['label'] ?? $o->id)->join(', ');
+                    $violations[] = "Exit '{$data['label']}' blocked by {$names}";
+                }
+            }
         }
 
         return [
             'valid' => empty($violations),
             'violations' => $violations,
             'summary' => $summary,
-            'scale_factor' => $this->scale_factor ?? 0.05,
+            'scale_factor' => $this->scaleFactor(),
             'units' => $this->units ?? 'meters',
         ];
     }
@@ -337,7 +402,7 @@ class VenueTemplate extends Model
         $radiusCanvas = $radiusMeters / ($this->scale_factor ?? 0.05);
 
         $query = $this->elements()->where('id', '!=', $center->id);
-        
+
         if (!empty($elementTypes)) {
             $query->whereIn('element_type', $elementTypes);
         }

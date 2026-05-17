@@ -5,17 +5,21 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\StoreZoneRequest;
 use App\Models\TemplateZone;
 use App\Models\VenueTemplate;
-use App\Http\Requests\StoreZoneRequest;
+use App\Services\TemplateCacheService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 class ZoneController extends Controller
 {
+    public function __construct(
+        private TemplateCacheService $templateCache,
+    ) {}
+
     /**
      * GET /api/v1/templates/{template}/zones
-     * List all zones in a template.
      */
     public function index(VenueTemplate $template): JsonResponse
     {
@@ -27,13 +31,14 @@ class ZoneController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => $zones,
+            'data'    => $zones,
         ]);
     }
 
     /**
      * POST /api/v1/templates/{template}/zones
-     * Create a new zone.
+     *
+     * Creates a zone and invalidates cache for affected events.
      */
     public function store(StoreZoneRequest $request, VenueTemplate $template): JsonResponse
     {
@@ -43,15 +48,21 @@ class ZoneController extends Controller
 
         $zone = TemplateZone::create($validated);
 
+        // Invalidate cache for published events using this template
+        $invalidated = $this->templateCache->invalidateTemplateCache($template->id);
+
         return response()->json([
             'success' => true,
-            'data' => $zone,
+            'data'    => $zone,
+            'meta'    => [
+                'cache_invalidated'          => $invalidated > 0,
+                'affected_published_events'  => $invalidated,
+            ],
         ], 201);
     }
 
     /**
      * GET /api/v1/zones/{zone}
-     * Get zone details with elements.
      */
     public function show(TemplateZone $zone): JsonResponse
     {
@@ -59,133 +70,163 @@ class ZoneController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => $zone,
+            'data'    => $zone,
         ]);
     }
 
     /**
      * PUT /api/v1/zones/{zone}
-     * Update a zone.
+     *
+     * Updates a zone and invalidates cache for affected events.
      */
     public function update(StoreZoneRequest $request, TemplateZone $zone): JsonResponse
     {
         $validated = $request->validated();
         $zone->update($validated);
 
+        // Invalidate cache for published events using this template
+        $invalidated = $this->templateCache->invalidateTemplateCache($zone->template_id);
+
         return response()->json([
             'success' => true,
-            'data' => $zone->fresh(),
+            'data'    => $zone->fresh(),
+            'meta'    => [
+                'cache_invalidated'          => $invalidated > 0,
+                'affected_published_events'  => $invalidated,
+            ],
         ]);
     }
 
     /**
      * DELETE /api/v1/zones/{zone}
-     * Delete a zone.
+     *
+     * Deletes a zone and invalidates cache for affected events.
      */
     public function destroy(TemplateZone $zone): JsonResponse
     {
-        // Remove element associations
+        $templateId = $zone->template_id;
         $zone->elements()->detach();
-
         $zone->delete();
+
+        // Invalidate cache for published events using this template
+        $invalidated = $this->templateCache->invalidateTemplateCache($templateId);
 
         return response()->json([
             'success' => true,
             'message' => 'Zone deleted successfully',
+            'meta'    => [
+                'cache_invalidated'          => $invalidated > 0,
+                'affected_published_events'  => $invalidated,
+            ],
         ]);
     }
 
     /**
      * POST /api/v1/zones/{zone}/assign-elements
-     * Assign elements to a zone.
+     *
+     * Assigns elements to a zone and invalidates cache.
      */
     public function assignElements(Request $request, TemplateZone $zone): JsonResponse
     {
         $validated = $request->validate([
-            'element_ids' => 'required|array',
-            'element_ids.*' => 'exists:template_elements,id',
-            'price_modifier' => 'nullable|numeric',
-            'modifier_type' => 'nullable|string|in:fixed,percent',
+            'element_ids'      => 'required|array',
+            'element_ids.*'    => 'exists:template_elements,id',
+            'price_modifier'   => 'nullable|numeric',
+            'modifier_type'    => 'nullable|string|in:fixed,percent',
         ]);
 
         $priceModifier = $validated['price_modifier'] ?? 0;
         $modifierType = $validated['modifier_type'] ?? 'fixed';
 
-        // Sync elements with pivot data
         $zone->elements()->syncWithoutDetaching(
             collect($validated['element_ids'])
-                ->mapWithKeys(fn($id) => [$id => [
+                ->mapWithKeys(fn ($id) => [$id => [
                     'price_modifier' => $priceModifier,
-                    'modifier_type' => $modifierType,
-                    'created_at' => now(),
-                    'updated_at' => now(),
+                    'modifier_type'  => $modifierType,
+                    'created_at'     => now(),
+                    'updated_at'     => now(),
                 ]])
                 ->toArray()
         );
 
+        // Invalidate cache for published events using this template
+        $invalidated = $this->templateCache->invalidateTemplateCache($zone->template_id);
+
         return response()->json([
             'success' => true,
             'message' => count($validated['element_ids']) . ' elements assigned to zone',
-            'data' => $zone->load('elements'),
+            'data'    => $zone->load('elements'),
+            'meta'    => [
+                'cache_invalidated'          => $invalidated > 0,
+                'affected_published_events'  => $invalidated,
+            ],
         ]);
     }
 
     /**
      * POST /api/v1/zones/{zone}/remove-elements
-     * Remove elements from a zone.
+     *
+     * Removes elements from a zone and invalidates cache.
      */
     public function removeElements(Request $request, TemplateZone $zone): JsonResponse
     {
         $validated = $request->validate([
-            'element_ids' => 'required|array',
+            'element_ids'   => 'required|array',
             'element_ids.*' => 'exists:template_elements,id',
         ]);
 
         $zone->elements()->detach($validated['element_ids']);
 
+        // Invalidate cache for published events using this template
+        $invalidated = $this->templateCache->invalidateTemplateCache($zone->template_id);
+
         return response()->json([
             'success' => true,
             'message' => count($validated['element_ids']) . ' elements removed from zone',
+            'meta'    => [
+                'cache_invalidated'          => $invalidated > 0,
+                'affected_published_events'  => $invalidated,
+            ],
         ]);
     }
 
     /**
      * GET /api/v1/zones/{zone}/elements
-     * Get all elements in a zone.
      */
     public function elements(TemplateZone $zone): JsonResponse
     {
         $elements = $zone->elements()
             ->orderBy('z_index')
             ->get()
-            ->map(fn($el) => [
-                'id' => $el->id,
+            ->map(fn ($el) => [
+                'id'           => $el->id,
                 'element_type' => $el->element_type,
-                'x' => $el->x,
-                'y' => $el->y,
-                'width' => $el->width,
-                'height' => $el->height,
-                'data' => $el->data_json,
-                'style' => $el->style_json,
-                'pivot' => [
+                'x'            => $el->x,
+                'y'            => $el->y,
+                'width'        => $el->width,
+                'height'       => $el->height,
+                'data'         => $el->data_json,
+                'style'        => $el->style_json,
+                'pivot'        => [
                     'price_modifier' => $el->pivot->price_modifier,
-                    'modifier_type' => $el->pivot->modifier_type,
+                    'modifier_type'  => $el->pivot->modifier_type,
                 ],
             ]);
 
         return response()->json([
             'success' => true,
-            'data' => [
-                'zone' => $zone,
+            'data'    => [
+                'zone'     => $zone,
                 'elements' => $elements,
-                'count' => $elements->count(),
+                'count'    => $elements->count(),
             ],
         ]);
     }
 
     /**
      * POST /api/v1/templates/{template}/zones/create-defaults
-     * Create default zones (VIP, Standard, Economy).
+     *
+     * Creates default zones and invalidates cache.
      */
     public function createDefaults(VenueTemplate $template): JsonResponse
     {
@@ -224,10 +265,17 @@ class ZoneController extends Controller
             $created[] = $zone;
         }
 
+        // Invalidate cache for published events using this template
+        $invalidated = $this->templateCache->invalidateTemplateCache($template->id);
+
         return response()->json([
             'success' => true,
             'message' => count($created) . ' default zones created',
-            'data' => $created,
+            'data'    => $created,
+            'meta'    => [
+                'cache_invalidated'          => $invalidated > 0,
+                'affected_published_events'  => $invalidated,
+            ],
         ], 201);
     }
 }
